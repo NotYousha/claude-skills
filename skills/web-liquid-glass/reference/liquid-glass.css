@@ -1,0 +1,2229 @@
+/* ==========================================================================
+   LIQUID GLASS
+   ======================================================================== */
+
+/*
+ * ICNL Liquid Glass — the translucent material layer.
+ *
+ * Apple's Liquid Glass (HIG, 2025) is not "a blurry box". It is a material with
+ * four separable parts, and a web version reads as cheap when it ships only the
+ * first one:
+ *
+ *   1. MATERIAL   — the backdrop is blurred AND saturation-boosted. The
+ *                   saturation is what stops glass looking like frosted grey
+ *                   plastic; real glass concentrates the colour behind it.
+ *   2. RIM        — a bright hairline where light catches the lens edge, and a
+ *                   dimmer one on the opposite edge. This is the single most
+ *                   recognisable part of the material; blur without a rim does
+ *                   not read as glass at any blur radius.
+ *   3. SHEEN      — a soft specular highlight sitting inside the top of the
+ *                   surface, as if a light source is above and slightly left.
+ *   4. DEPTH      — glass floats above content, so it casts a wide, very soft,
+ *                   low-opacity shadow. Not the tight card shadow.
+ *
+ * Refraction (content behind the glass visibly bending at the edge) is the
+ * fifth part and the only one the web cannot do cheaply — see `.lg-refract`.
+ *
+ * ---------------------------------------------------------------------------
+ * WHY THIS IS A SEPARATE LAYER AND NOT A REWRITE OF THE CARD/BUTTON PRIMITIVES
+ *
+ * Glass belongs on the NAVIGATION layer — the chrome that floats over content —
+ * and not on content itself. Apple is explicit about this, and it is also the
+ * accessibility position: body copy on a translucent surface has a contrast
+ * ratio that depends on whatever happens to scroll behind it, which cannot be
+ * guaranteed. So `.lg` is opt-in per surface, the existing opaque Card stays
+ * the default for content, and nothing here changes a component that does not
+ * ask for it.
+ *
+ * ---------------------------------------------------------------------------
+ * THE PERFORMANCE POSITION (read before putting `.lg` on anything `fixed`)
+ *
+ * components/shared/site-nav.tsx carries a long comment explaining why the
+ * header has no backdrop blur: a backdrop-filter on a fixed, full-width element
+ * re-samples and re-blurs the whole strip on every scroll frame. That finding
+ * stands. What this file changes is that the cost is now tunable rather than
+ * all-or-nothing:
+ *
+ *   - `--lg-blur` is a variable. The expensive part of a backdrop blur is the
+ *     radius, not the fact of it; 12px costs a fraction of 40px.
+ *   - `.lg-bar` adds `contain: paint` so the compositor knows the blurred
+ *     region cannot affect anything outside the bar.
+ *   - Every glass surface degrades to a near-opaque tint — visually close, zero
+ *     per-frame cost — under `prefers-reduced-transparency`, under browsers
+ *     without backdrop-filter, and under `.lg-off` on the root element, which
+ *     is what a visitor preference toggle would set.
+ *
+ * If the bar still janks on the target hardware, set `--lg-blur: 0px` on
+ * `.lg-bar` and keep everything else. The rim and sheen carry most of the look.
+ */
+
+@layer base {
+  /*
+   * `.lg-light` / `.lg-dark` ride along in the selector list rather than being
+   * separate rules, so there is one definition of each material and no chance of
+   * the two drifting apart.
+   *
+   * They exist because the theme class only lives on <html>, and a subtree
+   * sometimes knows better than the theme does which material it needs: a panel
+   * pinned over a permanently light surface, a comparison view showing both, a
+   * section that keeps its own palette the way `.kiosk-rawdha` does in
+   * globals.css. Custom properties resolve from the nearest ancestor that sets
+   * them, so a `.lg-light` div beats `.dark` on <html> without touching
+   * specificity or source order.
+   */
+  :root,
+  .lg-light {
+    /* --- Material -------------------------------------------------------- */
+    /*
+     * Blur radius. Raised for iOS 27: the headline change to the material that
+     * year was that it "more effectively diffuses complex content" behind it —
+     * the iOS 26 glass let busy backdrops read through as recognisable shapes,
+     * which is what made text on it hard to scan. Diffusion is mostly radius.
+     */
+    --lg-blur: 28px;
+    /* Bars re-blur on every scroll frame, so they stay cheaper. See `.lg-bar`. */
+    --lg-blur-bar: 18px;
+    /* Saturation boost. Below ~150% glass reads as grey plastic. */
+    --lg-sat: 200%;
+    /*
+     * The other half of diffusion, and the half a blur cannot do. Lifting
+     * brightness and pulling contrast in flattens whatever is behind the glass
+     * toward a single soft wash, so a photograph or a block of text stops
+     * competing with the label on top of it. Very small numbers: at
+     * contrast(0.8) the backdrop turns to fog and the surface stops looking
+     * like glass at all.
+     */
+    --lg-bright: 1.08;
+    --lg-contrast: 0.92;
+
+    /*
+     * THE ENTRANCE MULTIPLIER. 0 = the surface is not there at all; 1 = full
+     * material. Every visible part of the glass is multiplied by it — blur,
+     * saturation, the brightness/contrast diffusion, the tint, the rim, the
+     * specular and the float shadow — so a single animated value fades the
+     * whole surface in and out.
+     *
+     * It exists because a glass surface CANNOT fade with `opacity`. An element
+     * below `opacity: 1`, or with such an ancestor, forms a backdrop root: its
+     * `backdrop-filter` has nothing left to sample and renders as no filter at
+     * all, so the blur vanishes for the whole fade and then snaps on at the
+     * end. Animating the material instead keeps the filter live for every
+     * frame.
+     *
+     * Partial versions of this do not work, and that is the trap. Animating
+     * only the blur and the tint leaves the float shadow and the diffusion at
+     * full strength, so a ghost of the control sits on the page before its
+     * entrance starts — visible, and reported as "the pill appears before the
+     * animation". Everything has to be on the multiplier or none of it is.
+     */
+    --lg-enter: 1;
+
+    /*
+     * The tint. RGB triples rather than the site's HSL tokens because the rim
+     * and sheen are pure light and pure shadow — they are not theme colours and
+     * must not pick up the teal.
+     */
+    --lg-tint: 255 255 255;
+
+    /*
+     * CLARITY — the iOS 27 transparency slider, as one number.
+     *
+     * Apple shipped a Settings slider that runs the material from "ultra clear"
+     * to "fully tinted". That is exactly one axis, so it is exactly one
+     * variable here: 0 is ultra clear, 1 is fully tinted, and every surface on
+     * the site moves together when it changes. `--lg-tint-max` is what "fully
+     * tinted" means for this palette; clarity scales it.
+     *
+     * Set it on :root for a site-wide preference, or on any subtree for a
+     * surface that needs to be clearer or more solid than the rest.
+     */
+    --lg-clarity: 0.55;
+    /*
+     * A per-surface adjustment to clarity, ADDED to the slider rather than
+     * replacing it, so a bar or a hovered control can be more solid than the
+     * rest without the visitor's slider stopping working on it.
+     *
+     * It has to be a second variable. Writing `--lg-clarity: calc(var(--lg-clarity) + 0.2)`
+     * on the surface looks like the obvious way to say this and is a cycle: a
+     * custom property may not reference itself, so the whole declaration
+     * becomes invalid at computed-value time and quietly falls back to the
+     * inherited value. The bump would vanish with no error anywhere.
+     */
+    --lg-clarity-bump: 0;
+    /* Rim dimming while a control is held down. 1 = untouched. */
+    --lg-press: 1;
+    --lg-tint-max: 0.62;
+    /* "Clear" variant — used only over media, where a scrim guarantees ink. */
+    --lg-tint-max-clear: 0.16;
+    /*
+     * Bars get their OWN, much higher ceiling. A panel is translucent over a
+     * backdrop the reader chose to look at; a bar is translucent over whatever
+     * happens to be scrolling under it, which at the site's default ceiling
+     * left the nav links at roughly 4:1 over the hero photograph — legible on
+     * a good monitor and not on a phone in sunlight. This is the "uniform
+     * toolbar" half of the iOS 27 change stated as a number.
+     */
+    --lg-tint-max-bar: 0.92;
+
+    /* --- Rim + sheen ----------------------------------------------------- */
+    /*
+     * Brighter than iOS 26's, which is the other visual change Apple named —
+     * but bounded by the rule the `.lg-on-media` block sets out: the rim is the
+     * surface's own lip, so it must stay near the fill's value. Measured over
+     * the bench's dark backdrop, 0.9 put the rim at luminance 220 against a
+     * 155 fill, a 65-step cliff that reads as a separate white ring sitting on
+     * top of the panel rather than as its edge. 0.55 lands about 25 above the
+     * fill, which is a lip.
+     */
+    --lg-rim: 255 255 255;
+    --lg-rim-alpha: 0.55;
+    --lg-rim-alpha-low: 0.1;
+    --lg-shade: 0 0 0;
+    --lg-shade-alpha: 0.06;
+    --lg-sheen-alpha: 0.5;
+
+    /*
+     * WHERE THE LIGHT IS, as a percentage of the surface, x then y.
+     *
+     * Unitless so the sheen can do arithmetic on them. The defaults are the
+     * old hard-coded gradient position exactly, so a surface nothing is
+     * driving looks identical to the static build — which is also what every
+     * surface looks like under reduced motion, on the server render, and
+     * before hydration. Geometry rather than colour, so unlike every token
+     * above these are NOT redefined per theme.
+     *
+     * components/ui/glass-specular.tsx is the only thing that ever writes them.
+     */
+    --lg-lx: 22;
+    --lg-ly: -12;
+
+    /*
+     * The darkened outer edge, new in iOS 27. A hairline of shadow OUTSIDE the
+     * bright rim, so the sequence across the boundary is dark line → bright rim
+     * → glass. That ordering is what gives the surface a visible thickness and
+     * separates it from a light backdrop, which the iOS 26 material could not
+     * do — over a white page it had a white rim on white and simply dissolved.
+     */
+    --lg-edge-alpha: 0.14;
+
+    /* --- Depth ----------------------------------------------------------- */
+    /* Reuses the site's ink colour so the shadow is warm, not neutral grey. */
+    --lg-shadow: 200 14% 12%;
+
+    /* --- The selection lens (`.lg-chip`, Phase 2 Task 12f) --------------- */
+    /*
+     * The lens's own numbers, so a context (the nav bar, the sky, a filter
+     * row) restyles every lens inside it by setting variables, never by
+     * rewriting the material. Defaults: a white lens on a light track (the
+     * /prayer-times tabs). RGB triples, alphas 0-1. What each one draws is in
+     * the `.lg-chip` block (the SELECTION LENS) in the components layer.
+     */
+    --chip-tint: 255 255 255;
+    /* The clear body, top and bottom of a vertical fade. */
+    --chip-top: 0.85;
+    --chip-bottom: 0.55;
+    /* The context's colour under the body (a faint teal on the nav bar). */
+    --chip-wash: transparent;
+    /* The specular rim: peak at the top-left, the low it fades to. */
+    --chip-rim-a: 0.95;
+    --chip-rim-low: 0.2;
+    /* The inner light: a band across the top and a glint at --lg-lx/--lg-ly. */
+    --chip-band-a: 0.5;
+    --chip-spec-a: 0.4;
+    /* The darker lower-inner edge (thickness) and the close drop shadow. */
+    --chip-shade: 19 35 42;
+    --chip-shade-a: 0.07;
+    --chip-shadow: 19 35 42;
+    --chip-shadow-a: 0.16;
+    /* An unselected item under the pointer: a flat, faint lens. */
+    --chip-hover: hsl(var(--primary) / 0.06);
+    --chip-hover-ring: hsl(var(--primary) / 0.14);
+    /* Pressed: the rim brightens by this factor (see `.lens-item:active`). */
+    --chip-press: 1;
+    /*
+     * Tab-bar motion: a damped spring (4.6% overshoot, visually settled by
+     * 400 ms) as `linear()` stops; browsers without `linear()` get a short
+     * cubic with a slight overshoot (the @supports below swaps it in).
+     */
+    --lens-spring: cubic-bezier(0.3, 1.3, 0.5, 1);
+  }
+
+  @supports (transition-timing-function: linear(0, 1)) {
+    :root,
+    .lg-light {
+      --lens-spring: linear(0, 0.036, 0.124, 0.242, 0.371, 0.5, 0.62, 0.726, 0.815, 0.887, 0.943, 0.984, 1.013, 1.031, 1.042, 1.046, 1.045, 1.042, 1.037, 1.031, 1.025, 1.02, 1.014, 1.01, 1.006, 1.004, 1.001, 1, 1);
+    }
+  }
+
+  .dark,
+  .lg-dark {
+    /*
+     * Dark glass is NOT light glass with a darker tint. Under a dark theme the
+     * material tints toward black and the rim gets *brighter* relative to it —
+     * a dark lens edge on a dark page is invisible, and the surface collapses
+     * back into the background. The tint alpha also drops, because a 55% black
+     * tint over a near-black page is just a black rectangle.
+     */
+    --lg-tint: 12 20 24;
+    --lg-tint-max: 0.58;
+    --lg-tint-max-clear: 0.24;
+    --lg-tint-max-bar: 0.88;
+
+    /* Dark glass has to brighten what is behind it LESS, or a dark photograph
+       turns to grey soup; the contrast pull does most of the diffusing here. */
+    --lg-bright: 0.92;
+    --lg-contrast: 0.94;
+
+    --lg-rim-alpha: 0.22;
+    --lg-rim-alpha-low: 0.05;
+    --lg-shade-alpha: 0.3;
+    --lg-sheen-alpha: 0.2;
+
+    /*
+     * Still the strongest of the three — a dark outer edge is the only thing
+     * separating a dark pane from a dark page, so it does the most work here —
+     * but nothing like the 0.45 it started at. That put the edge at luminance
+     * 17 against a page at 30: a dark ring dipping well BELOW the background,
+     * with the bright rim immediately inside it. Two rings, not one boundary.
+     * The edge should darken the seam, not draw a line of its own.
+     */
+    --lg-edge-alpha: 0.2;
+
+    --lg-shadow: 200 40% 2%;
+
+    /*
+     * The dark lens: barely any white (light text must stay AA over it), a
+     * dimmer rim that still reads against the dark, a stronger lower edge and
+     * a deeper drop shadow, since depth is what separates dark from dark.
+     */
+    --chip-top: 0.1;
+    --chip-bottom: 0.03;
+    --chip-rim-a: 0.45;
+    --chip-rim-low: 0.06;
+    --chip-band-a: 0.08;
+    --chip-spec-a: 0.08;
+    --chip-shade: 0 0 0;
+    --chip-shade-a: 0.3;
+    --chip-shadow: 0 0 0;
+    --chip-shadow-a: 0.5;
+    --chip-hover: hsl(var(--primary) / 0.05);
+    --chip-hover-ring: hsl(var(--primary) / 0.24);
+  }
+
+  /*
+   * Glass sitting over a dark photograph, regardless of theme — the hero pills,
+   * the lightbox chrome. Here the page behind is always dark, so the light
+   * theme's white tint would be a bright smear. Scope it with `.lg-on-media`
+   * on the surface or any ancestor.
+   */
+  .lg-on-media {
+    --lg-tint: 255 255 255;
+    --lg-tint-max: 0.32;
+    --lg-tint-max-clear: 0.09;
+    --lg-tint-max-bar: 0.4;
+    /*
+     * Rim and edge are BOTH held down here, and the reason is measurable.
+     *
+     * The rim is painted 1px INSIDE the border box and the darkened edge 0.5px
+     * OUTSIDE it, so they are adjacent but separate rings. Sampling the hero's
+     * address pill down through its top edge, the old values gave:
+     *
+     *   page 22 → 16 16 → 141 141 140 139 → 99 98 97   (luminance)
+     *
+     * a dark ring dipping BELOW the page, then a 41-step cliff up to the rim,
+     * then the surface. Two concentric rings — which is exactly what "double
+     * border" means, and not what a lens edge looks like.
+     *
+     * A lens edge is ONE boundary: the surface lifts into a bright lip and
+     * stops. So the rim now sits close enough to the fill to read as its lip
+     * rather than as a ring floating above it, and the dark edge only has to
+     * keep the pill from dissolving where the photograph behind it is light —
+     * it does not need to be a line in its own right. Over a dark backdrop it
+     * had nothing to separate anyway.
+     */
+    /*
+     * The rim is pinned WELL BELOW the fill here, and that ratio is the whole
+     * point. Over a near-black photograph the tint resolves to about 0.17
+     * white; a 0.34 rim is then twice the brightness of the surface it is
+     * supposed to edge, and the control stops reading as glass and starts
+     * reading as an outlined button — which is exactly what it looked like
+     * before any of this, when it was `border-white/25 bg-white/10`.
+     *
+     * Glass has a lip you can find if you look for it, not a stroke.
+     */
+    --lg-rim-alpha: 0.13;
+    --lg-rim-alpha-low: 0.05;
+    --lg-sheen-alpha: 0.3;
+    --lg-shade-alpha: 0.18;
+    /* Over a photograph the diffusion is doing the real work — this is where
+       iOS 26 glass failed worst, with faces and edges legible through the
+       pane and fighting the label. */
+    --lg-bright: 1.04;
+    --lg-contrast: 0.88;
+    --lg-edge-alpha: 0.08;
+  }
+}
+
+@layer components {
+  /* ===========================================================================
+     The surface
+     ======================================================================== */
+
+  .lg {
+    position: relative;
+    /*
+     * `isolation: isolate` so the sheen's blend mode composites against this
+     * surface and not against whatever the page has stacked behind it — without
+     * it the highlight bleeds onto the backdrop and the edges go milky.
+     */
+    isolation: isolate;
+    /* The clarity slider resolves here and nowhere else. */
+    background-color: rgb(
+      var(--lg-tint) /
+        calc(
+          var(--lg-tint-max) *
+            clamp(0, calc(var(--lg-clarity) + var(--lg-clarity-bump)), 1) *
+            var(--lg-enter)
+        )
+    );
+    /*
+     * Reset the bump on every surface, so a glass control sitting inside a
+     * glass bar does not inherit the bar's. Variants below re-set it; they come
+     * later in this file at the same specificity, so they win.
+     */
+    --lg-clarity-bump: 0;
+    -webkit-backdrop-filter: blur(calc(var(--lg-blur) * var(--lg-enter)))
+      saturate(calc(100% + (var(--lg-sat) - 100%) * var(--lg-enter)))
+      brightness(calc(1 + (var(--lg-bright) - 1) * var(--lg-enter)))
+      contrast(calc(1 + (var(--lg-contrast) - 1) * var(--lg-enter)));
+    backdrop-filter: blur(calc(var(--lg-blur) * var(--lg-enter)))
+      saturate(calc(100% + (var(--lg-sat) - 100%) * var(--lg-enter)))
+      brightness(calc(1 + (var(--lg-bright) - 1) * var(--lg-enter)))
+      contrast(calc(1 + (var(--lg-contrast) - 1) * var(--lg-enter)));
+    /*
+     * The float, and ONLY the float. One shadow sampled at three distances —
+     * tight and faint, medium, then very wide and very soft. A single shadow
+     * reads as a sticker; the stack reads as something hovering.
+     *
+     * THE SURFACE HAS EXACTLY ONE EDGE, and it is the gradient rim that
+     * `::before` draws. Nothing else here may touch the boundary.
+     *
+     * Two things have been removed from this property for that reason, and
+     * neither should come back:
+     *
+     *   `inset 0 1px 0` / `inset 0 -1px 0` — bevel lines from before `::before`
+     *   existed. Once it did, they drew the same lens edge a second time, one
+     *   pixel further in.
+     *
+     *   `0 0 0 0.5px` — the iOS 27 "darkened outer edge". Correct idea, wrong
+     *   geometry on the web: a spread shadow lands OUTSIDE the border box while
+     *   the rim is painted INSIDE it, so the two are separated by the border
+     *   itself and read as two concentric rings rather than one boundary.
+     *   Measured on the hero pill: page 22, edge 16, rim 141, fill 99 — a dark
+     *   ring, a gap, then a bright ring. Lowering the alphas narrowed the gap
+     *   and never closed it, because the gap is structural. On the web the
+     *   darkened edge has to BE the rim, not sit beside it — which is what
+     *   `--lg-edge-alpha` now does, inside the `::before` gradient.
+     *
+     * The one place a second outline is still drawn deliberately is
+     * `prefers-contrast: more`, where an unambiguous boundary is the whole
+     * point and a doubled edge is a feature.
+     */
+    box-shadow:
+      0 1px 2px -1px hsl(var(--lg-shadow) / calc(0.1 * var(--lg-enter))),
+      0 8px 24px -10px hsl(var(--lg-shadow) / calc(0.18 * var(--lg-enter))),
+      0 24px 56px -28px hsl(var(--lg-shadow) / calc(0.24 * var(--lg-enter)));
+  }
+
+  /*
+   * The rim: a 1px gradient hairline that follows the border radius.
+   *
+   * A plain `border` cannot do this — a border takes ONE colour, and the whole
+   * point of the rim is that it is bright where the light hits and nearly gone
+   * where it does not. The technique is a full-bleed gradient masked down to the
+   * border box: paint the gradient, then punch out everything except a 1px ring.
+   * `padding: 1px` sets the ring's thickness; `mask-composite: exclude` removes
+   * the interior.
+   *
+   * 145deg, not 90deg: the light source is above and to the LEFT, so the bright
+   * run starts at the top-left corner. The second bright stop at 100% is the far
+   * edge catching light through the lens body — drop it and the surface reads as
+   * a flat pane rather than a thick one.
+   */
+  .lg::before {
+    content: "";
+    position: absolute;
+    inset: 0;
+    /*
+     * Negative, so the rim and the sheen paint between the surface's own
+     * background and its content. `isolation: isolate` above keeps them from
+     * escaping behind the page.
+     *
+     * This ALSO means the surface's children need no z-index of their own. A rule
+     * like `.lg > * { z-index: 2 }` would look equivalent and is not: it cannot
+     * reach bare text nodes, so a glass pill written as `<p><Icon/>Text</p>` gets
+     * its icon lifted and its words left underneath the sheen.
+     */
+    z-index: -1;
+    border-radius: inherit;
+    padding: 1px;
+    /*
+     * ONE ring that carries both halves of the edge.
+     *
+     * The bright stops are where light lands — top-left, and the far corner
+     * where light leaving the lens catches the lip. The MIDDLE stops are
+     * `--lg-shade`, not a dimmer white: the parts of the rim facing away from
+     * the light are genuinely darker than the surface, not merely less bright.
+     *
+     * That is what the iOS 27 "darkened edge" is, expressed the only way the
+     * web can express it without drawing a second ring. As a separate
+     * `0 0 0 0.5px` shadow it landed outside the border box while this rim
+     * paints inside it, so the two were divided by the border and read as two
+     * concentric outlines. Inside the gradient they are one hairline that goes
+     * light → dark → light around the perimeter, which is what a lens edge
+     * actually does.
+     */
+    background: linear-gradient(
+      145deg,
+      rgb(var(--lg-rim) / calc(var(--lg-rim-alpha) * var(--lg-press) * var(--lg-enter)))
+        0%,
+      rgb(var(--lg-shade) / calc(var(--lg-edge-alpha) * var(--lg-enter))) 38%,
+      rgb(var(--lg-shade) / calc(var(--lg-edge-alpha) * var(--lg-enter))) 62%,
+      rgb(var(--lg-rim) / calc(var(--lg-rim-alpha) * 0.7 * var(--lg-press) * var(--lg-enter)))
+        100%
+    );
+    -webkit-mask:
+      linear-gradient(#000 0 0) content-box,
+      linear-gradient(#000 0 0);
+    mask:
+      linear-gradient(#000 0 0) content-box,
+      linear-gradient(#000 0 0);
+    -webkit-mask-composite: xor;
+    mask-composite: exclude;
+    pointer-events: none;
+  }
+
+  /*
+   * The sheen: the specular highlight inside the top of the surface.
+   *
+   * An off-centre ellipse rather than a linear fade, because a linear fade looks
+   * like a gradient and an ellipse looks like a reflection. `screen` blend so it
+   * only ever adds light — over a dark backdrop it brightens, over a light one it
+   * does almost nothing, which is the correct physical behaviour and means one
+   * rule works in both themes.
+   */
+  .lg::after {
+    content: "";
+    position: absolute;
+    inset: 0;
+    z-index: -1;
+    border-radius: inherit;
+    /*
+     * TWO highlights, which is what "brighter specular highlights" in iOS 27
+     * actually looks like in practice — not one gradient turned up.
+     *
+     * The first is the light source itself, off the top-left. The second is the
+     * much fainter glint on the opposite corner, where light that entered the
+     * lens leaves it again. One highlight reads as a gradient overlay; two
+     * reads as a curved, physical object, and the second one costs nothing
+     * because it is the same paint.
+     *
+     * Both are positioned from `--lg-lx` / `--lg-ly` rather than being pinned,
+     * so the pair tracks the pointer on a desktop and the device's tilt on a
+     * phone — the thing Apple means by "picks up specular highlights as the
+     * device moves", and the difference between light landing on a surface and
+     * a gradient painted onto one.
+     *
+     * The counter-glint is DERIVED, not driven. Reflecting the light through
+     * (55%, 48%) — the constants below are twice that — puts it on the far side
+     * of the lens, guarantees the two can never converge, and halves the work:
+     * two property writes per surface per frame instead of four. The pivot is
+     * deliberately off-centre, because a true mirror about 50/50 reads as a
+     * mechanical reflection rather than as light leaving a thick object. At
+     * rest these reproduce the old fixed 88% / 108% position exactly.
+     */
+    background:
+      radial-gradient(
+        120% 80% at calc(var(--lg-lx) * 1%) calc(var(--lg-ly) * 1%),
+        rgb(var(--lg-rim) / calc((var(--lg-sheen-alpha) + var(--lg-sheen-bump, 0)) * var(--lg-enter))) 0%,
+        rgb(var(--lg-rim) / 0) 58%
+      ),
+      radial-gradient(
+        90% 60% at calc((110 - var(--lg-lx)) * 1%)
+          calc((96 - var(--lg-ly)) * 1%),
+        rgb(var(--lg-rim) / calc((var(--lg-sheen-alpha) + var(--lg-sheen-bump, 0)) * 0.45 * var(--lg-enter))) 0%,
+        rgb(var(--lg-rim) / 0) 62%
+      );
+    mix-blend-mode: screen;
+    pointer-events: none;
+  }
+
+  /* ===========================================================================
+     Variants
+     ======================================================================== */
+
+  /*
+   * Clear glass — Apple's second variant, for surfaces over photography or video
+   * where the content behind is the point. Much less tint, a heavier blur to
+   * compensate, and it is ONLY legible over a dimming scrim, so it ships with
+   * one rather than trusting each call site to remember.
+   */
+  .lg-clear {
+    --lg-tint-max: var(--lg-tint-max-clear);
+    --lg-blur: 24px;
+    background-image: linear-gradient(
+      to bottom,
+      rgb(0 0 0 / 0.16),
+      rgb(0 0 0 / 0.28)
+    );
+    /*
+     * The ink is fixed, not inherited, and that is the point.
+     *
+     * Clear glass is barely tinted, so the only thing guaranteeing contrast is
+     * the dark scrim above — which means content on it must be light, in BOTH
+     * themes, always. Leaving the colour to inherit makes that a rule every call
+     * site has to remember, and the failure mode is dark text on a dark scrim
+     * over a photograph: unreadable, and only on the pages where someone put a
+     * dark image behind it. Setting it here makes the variant safe to reach for.
+     *
+     * A call site that genuinely needs other ink can still override it; it just
+     * has to say so.
+     */
+    color: rgb(255 255 255 / 0.95);
+  }
+
+  /*
+   * THE DEMO'S MATERIALS (full-site-prototype/_source/site.css 181-188,
+   * 339-349, 122-126). Each rides on `.lg`: it sets `--lg-tint-max: 0`, so
+   * `.lg`'s own tint is transparent, and paints the demo's gradient as
+   * `background-image`. `--lg-tint` holds the demo's near-opaque fallback
+   * colour (site.css 1023-1027). So every degradation below works unchanged:
+   * the lite tier and the no-backdrop-filter fallback raise --lg-tint-max to
+   * 0.94, reduced transparency and more contrast to 1 (and drop the image),
+   * and `.lg` keeps the one backdrop-filter, built from these variables.
+   * The rim is `.lg::before`'s ring with the demo's gradient; the specular
+   * keeps reading --lg-lx / --lg-ly (glass-specular.tsx), which rest exactly
+   * where the demo puts it. tests/unit/glass-materials.test.ts pins them.
+   */
+
+  /* The hero's Today card (Phase 2 Task 6): the panels' glass over the sky,
+     in the visitor's mode, not the prayer's. One design, two gradients: a
+     light one (white, through #EAF1FA, to a pale blue) or the Isha night
+     (near-black to dark blue), both painted at --pn-card-alpha over the blurred
+     sky so it still reads as glass. The values are the `--pn-*` variables
+     (the PRAYER PANELS section at the foot of this file), pinned, with every
+     ink's contrast over every sky, by tests/unit/panel-theme.test.ts. The
+     blur and the saturation are the demo's (site.css 181-188). `--lg-tint` is
+     the gradient's middle: the solid colour of the strict fallbacks and the
+     base under the gradient in lite, so lite is the same card without the
+     backdrop-filter. */
+  .lg-sky-card {
+    --lg-tint: var(--pn-bg-mid);
+    --lg-tint-max: 0;
+    --lg-blur: 28px;
+    --lg-sat: 180%;
+    --lg-bright: 1;
+    --lg-contrast: 1;
+    background-image: linear-gradient(180deg, rgb(var(--pn-bg-top) / var(--pn-card-alpha)), rgb(var(--pn-bg-mid) / var(--pn-card-alpha)) 50%, rgb(var(--pn-bg-bottom) / var(--pn-card-alpha)));
+    box-shadow: var(--pn-shadow);
+  }
+  .lg-sky-card::before {
+    background: var(--pn-edge);
+  }
+  .lg-sky-card::after {
+    background: radial-gradient(90% 46% at 22% -12%, rgb(var(--pn-glint-rgb) / var(--pn-glint-alpha)), transparent 70%), radial-gradient(70% 40% at 90% 110%, rgb(var(--pn-glow-rgb) / var(--pn-glow-alpha)), transparent 70%);
+    mix-blend-mode: normal;
+  }
+  /* The card's glint is fixed (as the tinted card's always was and the panels' is), not pointer-driven: the contrast tests model it there. Mirrored on /ar. */
+  [dir="rtl"] .lg-sky-card::after {
+    transform: scaleX(-1);
+  }
+  /* Under the night's Northern Lights (THE NORTHERN LIGHTS, further down)
+     the sky behind the card moves, so its backdrop is re-blurred as the
+     curtains drift: half the blur there, which at the card's 0.94 tint looks
+     the same and costs far less. Server key, then the live root key. */
+  .hero-sky[data-sky="isha"] .lg-sky-card,
+  html[data-sky-now="isha"] .hero-sky .lg-sky-card {
+    --lg-blur: 14px;
+  }
+  html[data-sky-now]:not([data-sky-now="isha"]) .hero-sky[data-sky="isha"] .lg-sky-card {
+    --lg-blur: 28px;
+  }
+
+  /*
+   * THE HOMEPAGE NOTICES (Task 54; components/home/announcements.tsx and
+   * greeting-banner.tsx, and the verse card on /ramadan): the Today card's
+   * tinted glass, one `data-tint` per card, on the notice band
+   * (`.notice-band`, below), which continues the hero's Dhuhr blue.
+   *
+   * NO backdrop-filter, deliberately. A page may have at most 6
+   * backdrop-filter surfaces, and with several notices the homepage would
+   * overflow that. Nor would a blur show: the band behind the cards is a
+   * smooth gradient, so blurring it changes nothing. The cards therefore
+   * carry the glass LOOK only: the tint's wash over the dark glass, the one
+   * `::before` edge and the `::after` reflection. Because nothing is
+   * sampled, this is not `.lg` and none of `.lg`'s tiers reach it; the
+   * solid tiers are written for it below (`--notice-solid`: 0 here, 0.94 in
+   * lite, 1 for reduced transparency, more contrast and lg-off).
+   *
+   * The reflection is fixed (no pointer tracking, no ambient motion) and
+   * mirrored on /ar so the light comes from the side reading starts on.
+   * Values from lib/home/notice-glass.ts, pinned by
+   * tests/unit/design-contrast.test.ts. Not theme-scoped: the band is the
+   * same blue in both themes, so the cards are too.
+   */
+  .lg-notice {
+    --lg-tint: 10 24 30;
+    --notice-solid: 0;
+    position: relative;
+    isolation: isolate;
+    background-color: rgb(var(--lg-tint) / var(--notice-solid));
+    background-image: var(--sky-wash, none), linear-gradient(180deg, rgb(6 14 20 / 0.3), rgb(6 14 20 / 0.44));
+    box-shadow: 0 24px 48px -30px rgb(2 8 12 / 0.7);
+    color: #fff;
+  }
+  .lg-notice::before {
+    content: "";
+    position: absolute;
+    inset: 0;
+    z-index: -1;
+    border-radius: inherit;
+    padding: 1px;
+    background: linear-gradient(155deg, rgb(255 255 255 / 0.46), rgb(255 255 255 / 0.12) 28%, rgb(0 0 0 / 0.18) 55%, rgb(255 255 255 / 0.18));
+    -webkit-mask:
+      linear-gradient(#000 0 0) content-box,
+      linear-gradient(#000 0 0);
+    mask:
+      linear-gradient(#000 0 0) content-box,
+      linear-gradient(#000 0 0);
+    -webkit-mask-composite: xor;
+    mask-composite: exclude;
+    pointer-events: none;
+  }
+  .lg-notice::after {
+    content: "";
+    position: absolute;
+    inset: 0;
+    z-index: -1;
+    border-radius: inherit;
+    background: var(--sky-glint, none);
+    pointer-events: none;
+  }
+  [dir="rtl"] .lg-notice::after {
+    transform: scaleX(-1);
+  }
+  .lg-notice[data-tint="ramadan"] {
+    --lg-tint: 18 35 50;
+    --sky-wash: linear-gradient(180deg, rgb(52 78 130 / 0.42), rgb(52 78 130 / 0.14) 45%, rgb(52 78 130 / 0));
+    --sky-glint: radial-gradient(90% 46% at 22% -12%, rgb(226 178 90 / 0.42), transparent 70%), radial-gradient(70% 40% at 90% 110%, rgb(52 78 130 / 0.3), transparent 70%);
+  }
+  /* Eid, Jumu'ah and Important: the brief's colours exactly, with only the
+     glint dimmed (by 33%, 48% and 33%), the least that keeps white text AA
+     under it (lib/home/notice-glass.ts NOTICE_GLINT_DARKEN). */
+  .lg-notice[data-tint="eid"] {
+    --lg-tint: 53 55 42;
+    --sky-wash: linear-gradient(180deg, rgb(226 178 90 / 0.42), rgb(226 178 90 / 0.14) 45%, rgb(226 178 90 / 0));
+    --sky-glint: radial-gradient(90% 46% at 22% -12%, rgb(171 153 113 / 0.42), transparent 70%), radial-gradient(70% 40% at 90% 110%, rgb(226 178 90 / 0.3), transparent 70%);
+  }
+  .lg-notice[data-tint="jummah"] {
+    --lg-tint: 45 60 66;
+    --sky-wash: linear-gradient(180deg, rgb(185 205 209 / 0.42), rgb(185 205 209 / 0.14) 45%, rgb(185 205 209 / 0));
+    --sky-glint: radial-gradient(90% 46% at 22% -12%, rgb(119 124 125 / 0.42), transparent 70%), radial-gradient(70% 40% at 90% 110%, rgb(185 205 209 / 0.3), transparent 70%);
+  }
+  .lg-notice[data-tint="emergency"] {
+    --lg-tint: 52 35 38;
+    --sky-wash: linear-gradient(180deg, rgb(220 80 70 / 0.42), rgb(220 80 70 / 0.14) 45%, rgb(220 80 70 / 0));
+    --sky-glint: radial-gradient(90% 46% at 22% -12%, rgb(255 170 160 / 0.42), transparent 70%), radial-gradient(70% 40% at 90% 110%, rgb(220 80 70 / 0.3), transparent 70%);
+  }
+  .lg-notice[data-tint="important"] {
+    --lg-tint: 51 56 52;
+    --sky-wash: linear-gradient(180deg, rgb(216 185 138 / 0.42), rgb(216 185 138 / 0.14) 45%, rgb(216 185 138 / 0));
+    --sky-glint: radial-gradient(90% 46% at 22% -12%, rgb(161 145 117 / 0.42), transparent 70%), radial-gradient(70% 40% at 90% 110%, rgb(216 185 138 / 0.3), transparent 70%);
+  }
+  /* Every other notice: the clear harbour glass of the untinted Today card. */
+  .lg-notice[data-tint="notice"] {
+    --lg-tint: 10 24 30;
+    --sky-glint: radial-gradient(90% 46% at 22% -12%, rgb(255 255 255 / 0.16), transparent 70%);
+  }
+
+  /* The panes on the calendar section (site.css 339-346): frosted white in
+     light, clear harbour teal in dark.
+
+     CONTENT PANES ARE PAINTED GLASS (Apple design review #7, 22 Oct 2026;
+     HIG Materials: no Liquid Glass in the content layer). The dates, Stay
+     connected and the ayah cards keep their gradient, rim and glint, but
+     sample no backdrop: their `--lg-tint` (the opaque stand-in for the
+     blurred section behind them) is painted underneath at the lite tier's
+     0.94, so every tier renders them the way lite always has. The strict
+     modes (reduced transparency, more contrast, lg-off) still raise it to 1.
+     That leaves the capsule as the page's real glass. `--lg-sat` stays: the
+     stand-in tint is the section's colour through it (design-contrast). */
+  .lg-pane {
+    /* The opaque stand-in for the blurred calendar backdrop behind it (Task 57
+       item 10): the section's middle through saturate(190%) (lib/design/surfaces.ts behindGlass), so the lite tier
+       and the strict modes keep the full tier's tinted look. */
+    --lg-tint: 237 245 246;
+    --lg-clarity: 1;
+    --lg-clarity-bump: 0;
+    --lg-tint-max: 0.94;
+    -webkit-backdrop-filter: none;
+    backdrop-filter: none;
+    --lg-sat: 190%;
+    --lg-bright: 1;
+    --lg-contrast: 1;
+    background-image: linear-gradient(180deg, rgb(255 255 255 / 0.66), rgb(255 255 255 / 0.42));
+    box-shadow: 0 22px 44px -28px rgb(19 35 42 / 0.42), 0 2px 6px -2px rgb(19 35 42 / 0.08);
+  }
+  .lg-pane::before {
+    background: linear-gradient(160deg, rgb(255 255 255 / 0.98), rgb(255 255 255 / 0.55) 30%, rgb(19 35 42 / 0.12) 68%, rgb(255 255 255 / 0.7));
+  }
+  .lg-pane::after {
+    background: radial-gradient(85% 55% at calc((var(--lg-lx) - 2) * 1%) calc((var(--lg-ly) - 2) * 1%), rgb(255 255 255 / 0.75), transparent 70%);
+    mix-blend-mode: normal;
+  }
+  .dark .lg-pane {
+    --lg-tint: 3 29 40;
+    background-image: linear-gradient(180deg, rgb(22 40 50 / 0.62), rgb(14 28 36 / 0.48));
+    box-shadow: 0 24px 48px -26px rgb(0 0 0 / 0.75);
+  }
+  .dark .lg-pane::before {
+    background: linear-gradient(160deg, rgb(255 255 255 / 0.3), rgb(255 255 255 / 0.08) 30%, rgb(0 0 0 / 0.25) 68%, rgb(255 255 255 / 0.12));
+  }
+  .dark .lg-pane::after {
+    background: radial-gradient(85% 55% at calc((var(--lg-lx) - 2) * 1%) calc((var(--lg-ly) - 2) * 1%), rgb(255 255 255 / 0.1), transparent 70%);
+  }
+
+  /* The ayah card on the deep band, the same in both themes (site.css 347-349). */
+  .lg-pane-deep {
+    /* The opaque stand-in for the blurred band behind it (Task 57 item 10):
+       the band's teal through saturate(190%)
+       (lib/design/surfaces.ts behindGlass). Lite paints it at 0.94 under the
+       card's own gradient, the strict modes at 1, so neither goes near-black. */
+    --lg-tint: 0 59 80;
+    --lg-clarity: 1;
+    --lg-clarity-bump: 0;
+    --lg-tint-max: 0.94;
+    -webkit-backdrop-filter: none;
+    backdrop-filter: none;
+    --lg-sat: 190%;
+    --lg-bright: 1;
+    --lg-contrast: 1;
+    background-image: linear-gradient(180deg, rgb(8 22 28 / 0.3), rgb(8 22 28 / 0.46));
+    box-shadow: 0 30px 60px -30px rgb(0 0 0 / 0.6);
+  }
+  /* The band follows the page's theme (the card's content is always `.dark`),
+     so the dark page's stand-in is its own band's, a shade darker. */
+  html.dark .lg-pane-deep {
+    --lg-tint: 0 47 64;
+  }
+  .lg-pane-deep::before {
+    background: linear-gradient(155deg, rgb(255 255 255 / 0.4), rgb(255 255 255 / 0.1) 30%, rgb(0 0 0 / 0.2) 62%, rgb(255 255 255 / 0.14));
+  }
+  .lg-pane-deep::after {
+    background: radial-gradient(80% 50% at calc(var(--lg-lx) * 1%) calc(var(--lg-ly) * 1%), rgb(255 255 255 / 0.12), transparent 70%);
+    mix-blend-mode: normal;
+  }
+
+  /* The Prayer Times sticky bar on phones (site.css 515-518): dark harbour
+     glass with its own rim. Its display and motion are unlayered, further
+     down ("The phone's next-prayer bar"). */
+  .lg-sticky {
+    --lg-tint: 10 30 38;
+    --lg-tint-max: 0;
+    --lg-blur: 20px;
+    --lg-sat: 180%;
+    --lg-bright: 1;
+    --lg-contrast: 1;
+    contain: paint;
+    background-image: linear-gradient(180deg, rgb(16 44 54 / 0.86), rgb(10 30 38 / 0.93));
+    box-shadow: 0 18px 40px -16px rgb(2 8 12 / 0.7);
+  }
+  .lg-sticky::before {
+    background: linear-gradient(155deg, rgb(255 255 255 / 0.4), rgb(255 255 255 / 0.08) 40%, rgb(255 255 255 / 0.16));
+  }
+  .lg-sticky::after {
+    display: none;
+  }
+
+  /*
+   * The nav bar (site.css 122-126, Task 38), since 22 Oct 2026 the capsule's
+   * FROSTED BODY (owner, after an iOS composer panel: content behind strongly
+   * blurred but still there as soft shapes, a gentle lift, an even bright
+   * rim). One look at the top of the page and scrolled, in every state. The
+   * lift is the glass's own background image (`.lg-nav.nav-glass`, CAPSULE-NAV
+   * block), at the least alpha that keeps every label AA over a black, a white
+   * or a fully saturated page after the blur (the worst case: one colour
+   * filling the whole capsule). `--lg-tint` is the lift's colour for the tiers
+   * that make the glass opaque (lite, reduced transparency, more contrast, no
+   * backdrop-filter), which raise `--lg-tint-max` as they do for every `.lg`.
+   * Values: lib/design/nav-glass.ts, pinned and measured by
+   * tests/unit/capsule-glass.test.ts. `::before` here is the old bar's top
+   * sheen; the capsule draws its one rim on `.nav-rim` instead.
+   */
+  .lg-nav {
+    --lg-tint: 246 248 248;
+    --lg-tint-max: 0;
+    --lg-clarity-bump: 1;
+    --nav-blur: 16px;
+    --lg-blur: var(--nav-blur);
+    --lg-sat: 150%;
+    --lg-bright: 1.05;
+    --lg-contrast: 1;
+    contain: paint;
+    box-shadow: inset 0 -1px 0 hsl(var(--border) / 0.8), 0 10px 30px -18px rgb(7 20 26 / 0.45);
+  }
+  .dark .lg-nav {
+    --lg-tint: 32 38 44;
+    --lg-tint-max: 0;
+  }
+  .lg-nav::before {
+    padding: 0;
+    background: linear-gradient(180deg, rgb(255 255 255 / 0.55), rgb(255 255 255 / 0) 55%);
+    -webkit-mask: none;
+    mask: none;
+    opacity: 0.6;
+  }
+  .dark .lg-nav::before {
+    opacity: 0.06;
+  }
+  .lg-nav::after {
+    display: none;
+  }
+
+  /*
+   * THE NAV'S LIQUID GLASS LINKS (Phase 2 Task 12d, tuned toward Apple's
+   * Liquid Glass in Task 12f). The bar is already one glass surface and a
+   * nested `backdrop-filter` is forbidden, so the current page's link is the
+   * SELECTION LENS (`.lg-chip`, below): rim, inner light and a close shadow,
+   * nothing sampled. Here the bar only sets the lens's variables: a faint
+   * teal wash under a clear body, so it reads as selected before it reads as
+   * glass, and the flat secondary pill for lite. Every lens inside the bar
+   * (the links, the sliding hover lens, the theme switch) takes them. Link
+   * text stays `text-foreground`: AA on the lens in both themes over any
+   * page behind the bar, the hero's dark sky included
+   * (tests/unit/lens-material.test.ts).
+   */
+  .lg-nav,
+  .nav-capsule {
+    --chip-wash: hsl(var(--primary) / 0.1);
+    --chip-top: 0.5;
+    --chip-bottom: 0.1;
+    --chip-solid: hsl(var(--secondary));
+  }
+  /* A dark bar: lighter teal, almost no white, so the light text keeps AA
+     under the lens's peak inner light and the bar's own top sheen.
+     (`.lg-dark` for the /glass-lab bench's dark column.) */
+  .dark .lg-nav,
+  .lg-dark .lg-nav,
+  .dark .nav-capsule,
+  .lg-dark .nav-capsule {
+    --chip-wash: hsl(var(--primary) / 0.08);
+    --chip-top: 0;
+    --chip-bottom: 0;
+    --chip-band-a: 0.03;
+    --chip-spec-a: 0.03;
+  }
+
+  /* CAPSULE-NAV:START */
+  /*
+   * THE FLOATING CAPSULE (owner, 21 Oct 2026, after the Kitepower reference;
+   * its glass rebuilt 22 Oct 2026 after Safari's iOS 28 toolbar and an iOS
+   * composer panel). The header is a transparent, click-through frame; the
+   * bar is one Liquid Glass capsule inside it, inset from the edges and the
+   * notch, a full pill (28px radius on the 56px phone capsule, 32px on the
+   * 64px one: half the closed height, Safari's toolbar shape; never 9999px,
+   * which would stadium the open phone menu). Its footprint is the old bar's: 8px gap plus a 56px
+   * (phone) or 64px capsule is 64 / 72px, so every page's reserved top space
+   * still fits and nothing shifts.
+   *
+   * ONE LOOK, at the top of the page and scrolled (owner, 21 Oct 2026: "at
+   * top it looks different and when we scroll down it looks different,
+   * fix"). Nothing about the capsule changes on scroll: no shrink, no tint
+   * fading in, no ink switching, and no scroll listener at all.
+   *
+   * Three layers behind the row, all `aria-hidden` siblings (a glass layer
+   * inside another would sample only its parent; see the glass notes):
+   *
+   *   .nav-lip    the float shadow, and nothing else. It was once a clear lip
+   *               (1px of blur plus a Chromium edge lens) under a body that
+   *               thinned toward the edge; since the body lost its rim mask
+   *               (f156113) the frost covers it edge to edge, so the lip's
+   *               backdrop-filter and the lens were retired (Apple design
+   *               review, 22 Oct 2026: glass cannot sample glass, and it cost
+   *               a full backdrop pass per scroll frame for nothing visible).
+   *   .nav-glass  the frosted body (`.lg-nav`: 16px blur, saturation, the
+   *               lift), unmasked: uniform frost right up to the rim, and
+   *               the capsule's only backdrop-filter.
+   *   .nav-rim    the ONE edge (`::before`, an even bright rim all round) and
+   *               the inner top highlight with the pointer / tilt specular
+   *               (`::after`). No backdrop-filter, unmasked.
+   *
+   * (The capsule carries the nav's `--chip-*` lens variables, above, and is a
+   * pointer-light surface: it is what the links inherit from.)
+   */
+  .site-nav {
+    padding-top: calc(env(safe-area-inset-top, 0px) + 8px);
+    padding-left: max(10px, env(safe-area-inset-left, 0px));
+    padding-right: max(10px, env(safe-area-inset-right, 0px));
+    pointer-events: none;
+  }
+  @media (min-width: 640px) {
+    .site-nav {
+      padding-left: max(16px, env(safe-area-inset-left, 0px));
+      padding-right: max(16px, env(safe-area-inset-right, 0px));
+    }
+  }
+  .nav-capsule {
+    position: relative;
+    isolation: isolate;
+    pointer-events: auto;
+    margin-inline: auto;
+    /* 1272px = the 1296px Tailwind container (tailwind.config.ts
+       container.screens["2xl"]) less its 24px padding, plus 12px past the
+       content edge each side (the Kitepower inset). Change them together;
+       capsule-nav.test.ts guards it. */
+    max-width: 1272px;
+    border-radius: 28px;
+    /* The inner top highlight's peak, per mode. lib/design/nav-glass.ts. */
+    --nav-sheen: 0.33;
+    /* One focus ring for every control in the capsule (the links, the
+       burger, the menu rows, WhatsApp and the preferences): the label ink.
+       The theme's light ring (193 52% 32%) falls under 3:1 on the light
+       glass over a dark sky; the ink clears 3:1 over every backdrop in both
+       modes (tests/unit/glass-polish.test.ts). */
+    --ring: var(--foreground);
+  }
+  @media (min-width: 761px) {
+    .nav-capsule {
+      border-radius: 32px;
+    }
+  }
+  .dark .nav-capsule,
+  .lg-dark .nav-capsule {
+    --nav-sheen: 0.05;
+  }
+  .nav-lip,
+  .nav-glass,
+  .nav-rim {
+    position: absolute;
+    inset: 0;
+    z-index: 0;
+    border-radius: inherit;
+    pointer-events: none;
+  }
+  .nav-lip {
+    box-shadow:
+      0 1px 2px -1px rgb(7 20 26 / 0.12),
+      0 12px 30px -16px rgb(7 20 26 / 0.45);
+  }
+  .dark .nav-lip {
+    box-shadow:
+      0 1px 2px -1px rgb(0 0 0 / 0.3),
+      0 14px 34px -14px rgb(0 0 0 / 0.6);
+  }
+  /* The frosted body: the lift as its background image, no shadow of its own
+     (the lip has it). NO mask: the frost is uniform right up to the rim, so
+     no dark ring of raw backdrop shows just inside it. */
+  .lg-nav.nav-glass {
+    background-image: linear-gradient(rgb(246 248 248 / 0.62), rgb(246 248 248 / 0.62));
+    box-shadow: none;
+  }
+  .dark .lg-nav.nav-glass {
+    background-image: linear-gradient(rgb(32 38 44 / 0.84), rgb(32 38 44 / 0.84));
+  }
+  /* The body draws no edge and no sheen: the rim layer does. */
+  .lg-nav.nav-glass::before,
+  .lg-nav.nav-glass::after {
+    display: none;
+  }
+  /* THE ONE EDGE: thin, even and bright all round, a touch brighter at the
+     top. Light mode's middle stops dip to a cool grey so the capsule still
+     has a boundary over a white page. */
+  .nav-rim::before {
+    content: "";
+    position: absolute;
+    inset: 0;
+    border-radius: inherit;
+    padding: 1px;
+    background: linear-gradient(180deg, rgb(255 255 255 / 0.95), rgb(255 255 255 / 0.6) 40%, rgb(150 165 172 / 0.4) 65%, rgb(255 255 255 / 0.7));
+    -webkit-mask:
+      linear-gradient(#000 0 0) content-box,
+      linear-gradient(#000 0 0);
+    mask:
+      linear-gradient(#000 0 0) content-box,
+      linear-gradient(#000 0 0);
+    -webkit-mask-composite: xor;
+    mask-composite: exclude;
+  }
+  /* Dark mode's rim is softer (Apple design review #10, 22 Oct 2026): at
+     0.75 the top stepped about 9.7:1 off the dark body and read as a drawn
+     outline; at 0.5 it is about 5:1, a lip you find when you look for it. */
+  .dark .nav-rim::before {
+    background: linear-gradient(180deg, rgb(255 255 255 / 0.5), rgb(255 255 255 / 0.24) 40%, rgb(255 255 255 / 0.24) 65%, rgb(255 255 255 / 0.38));
+  }
+  /* The inner top highlight plus the pointer / tilt specular (--lg-lx/--lg-ly,
+     components/ui/glass-specular.tsx), their peaks adding up to 1, so
+     `--nav-sheen` is the peak the contrast tests model. */
+  .nav-rim::after {
+    content: "";
+    position: absolute;
+    inset: 0;
+    border-radius: inherit;
+    background:
+      radial-gradient(70% 160% at calc(var(--lg-lx) * 1%) calc(var(--lg-ly) * 1%), rgb(255 255 255 / 0.4) 0%, rgb(255 255 255 / 0) 60%),
+      linear-gradient(180deg, rgb(255 255 255 / 0.6) 0%, rgb(255 255 255 / 0) 55%);
+    opacity: var(--nav-sheen);
+  }
+  /* The labels: the theme's ink; the other links, the language button and
+     the theme icons at 0.9 rather than their classes' 0.78 / 0.74 / 0.62
+     (measured at 0.9 over the worst case). */
+  .nav-capsule [data-nav-row] :is(.nav-link, .lens-item, a[hreflang]):not(.lg-chip, :hover) {
+    color: hsl(var(--foreground) / 0.9);
+  }
+
+  /* Opaque tiers: the body goes solid (`.lg` raises `--lg-tint-max`); no
+     sheen; under more contrast the material's own outline is the edge.
+     lg-off drops the sheen too, as it does every surface's `::after`. */
+  @media (prefers-reduced-transparency: reduce) {
+    .nav-rim::after {
+      display: none;
+    }
+  }
+  @media (prefers-contrast: more) {
+    .nav-rim::before,
+    .nav-rim::after {
+      display: none;
+    }
+  }
+  .lg-off .nav-rim::after {
+    display: none;
+  }
+  /* Stops short of the bottom edge: iOS 26 Safari paints its bottom bar
+     solid in the colour of a fixed box that reaches it, and the open menu
+     did, leaving a black strip (owner's iPhone, 29 Oct 2026). The menu
+     scrolls inside the room left. */
+  .nav-panel-scroll {
+    max-height: calc(100dvh - 5rem - env(safe-area-inset-top, 0px) - env(safe-area-inset-bottom, 0px) - 5.5rem);
+  }
+  /* CAPSULE-NAV:END */
+
+  /*
+   * THE GOLD SELECTION LENS (site.css 249-251): the next prayer in the Today
+   * card and on the board. Like `.lg-chip` it samples no backdrop (it sits in
+   * a surface that already does, or on the opaque board). One rim, its
+   * ::before; a warm specular, its ::after.
+   */
+  .lg-lens {
+    position: relative;
+    isolation: isolate;
+    background-image: linear-gradient(180deg, rgb(244 196 100 / 0.3), rgb(232 176 80 / 0.15) 60%, rgb(232 176 80 / 0.1));
+  }
+  .lg-lens::before {
+    content: "";
+    position: absolute;
+    inset: 0;
+    z-index: -1;
+    border-radius: inherit;
+    padding: 1px;
+    pointer-events: none;
+    background: linear-gradient(170deg, rgb(255 228 168 / 0.95), rgb(226 178 90 / 0.42) 45%, rgb(226 178 90 / 0.22) 75%, rgb(255 228 168 / 0.5));
+    -webkit-mask:
+      linear-gradient(#000 0 0) content-box,
+      linear-gradient(#000 0 0);
+    mask:
+      linear-gradient(#000 0 0) content-box,
+      linear-gradient(#000 0 0);
+    -webkit-mask-composite: xor;
+    mask-composite: exclude;
+  }
+  .lg-lens::after {
+    content: "";
+    position: absolute;
+    inset: 0;
+    z-index: -1;
+    border-radius: inherit;
+    pointer-events: none;
+    background: radial-gradient(70% 60% at 25% -20%, rgb(255 240 205 / 0.28), transparent 70%);
+  }
+
+  /*
+   * The demo's card primitives (site.css 117-119): one radius, an inset 1px
+   * border in the same box-shadow as the soft shadow, an icon chip and a tag
+   * pill. In this layer so a utility on the element still wins.
+   */
+  .surface-card {
+    border-radius: 24px;
+    background-color: hsl(var(--card));
+    box-shadow: inset 0 0 0 1px hsl(var(--border)), var(--shadow-soft);
+  }
+
+  /*
+   * Tabs before hydration (components/prayer/tabbed-views.tsx). The tab row
+   * and the first panel are what the page shows from its first paint, so the
+   * script arriving changes nothing (owner, 18 Oct 2026). Without JavaScript
+   * the anchor links replace the tabs and every panel shows, as before.
+   */
+  .tabs-nojs {
+    display: none;
+  }
+  @media (scripting: enabled) {
+    [data-tab-waiting] {
+      display: none;
+    }
+    .tab-h2 {
+      position: absolute;
+      width: 1px;
+      height: 1px;
+      padding: 0;
+      margin: -1px;
+      overflow: hidden;
+      clip: rect(0, 0, 0, 0);
+      white-space: nowrap;
+      border-width: 0;
+    }
+  }
+  @media (scripting: none) {
+    .tabs-js {
+      display: none;
+    }
+    .tabs-nojs {
+      display: block;
+    }
+  }
+
+  /*
+   * The month timetable's header stays in view while you scroll (owner,
+   * 18 Oct 2026). The table is wider than a phone, and a box that scrolls
+   * sideways cannot stick anything to the page, so below 1100px the table
+   * scrolls inside its card (about one screen tall) with the header pinned to
+   * the card's top. From 1100px it fits, the card only clips (clip makes no
+   * scroll box), and the header sticks to the page under the 72px nav.
+   * Collapsed borders do not travel with a sticky cell, so the header's rule
+   * is an inset shadow on the cells.
+   */
+  .times-scroll {
+    overflow: auto;
+    max-height: calc(100svh - 64px - env(safe-area-inset-top, 0px) - 24px);
+    overscroll-behavior-x: contain;
+  }
+  .times-scroll > table > thead {
+    position: sticky;
+    top: 0;
+    z-index: 2;
+  }
+  .times-scroll > table > thead th {
+    background-color: hsl(var(--card));
+  }
+  .times-scroll > table > thead th:not([scope="colgroup"]) {
+    box-shadow: inset 0 -1px 0 hsl(var(--border));
+  }
+  @media (min-width: 1100px) {
+    .times-scroll {
+      overflow: clip;
+      max-height: none;
+    }
+    .times-scroll > table > thead {
+      top: calc(72px + env(safe-area-inset-top, 0px));
+    }
+  }
+  /*
+   * The date column stays put while the times scroll sideways (owner, Nov
+   * 2026, design demo idea 4): on a phone the week and month tables are wider
+   * than the screen, and after one swipe the visitor lost which day a row
+   * was. `inset-inline-start` pins it to the left in English and to the right
+   * on /ar. A sticky cell slides over the others, so it needs a solid ground:
+   * the card, with the row's Today or Friday tint (table-marks.tsx rowTint,
+   * the same values) laid on it as an image, since the tint utility's
+   * translucent background-color would let the times show through. `tr >`
+   * outweighs that utility. Collapsed borders do not travel with a sticky
+   * cell, so its edge is a hairline drawn by ::after (the sticky cell is its
+   * containing block); the Today bar's inset shadow is left alone.
+   */
+  tr > .times-pin {
+    position: sticky;
+    inset-inline-start: 0;
+    z-index: 1;
+    background-color: hsl(var(--card));
+  }
+  thead tr > .times-pin {
+    z-index: 3;
+  }
+  tr[aria-current="date"] > .times-pin {
+    background-color: hsl(var(--card));
+    background-image: linear-gradient(hsl(var(--primary) / 0.07), hsl(var(--primary) / 0.07));
+  }
+  tr[data-friday]:not([aria-current]) > .times-pin {
+    background-color: hsl(var(--card));
+    background-image: linear-gradient(hsl(var(--secondary) / 0.7), hsl(var(--secondary) / 0.7));
+  }
+  .dark tr[data-friday]:not([aria-current]) > .times-pin {
+    background-color: hsl(var(--card));
+    background-image: linear-gradient(hsl(var(--foreground) / 0.06), hsl(var(--foreground) / 0.06));
+  }
+  tr > .times-pin::after {
+    content: "";
+    position: absolute;
+    inset-block: 0;
+    inset-inline-end: 0;
+    width: 1px;
+    background-color: hsl(var(--border));
+    pointer-events: none;
+  }
+  .icon-chip {
+    display: grid;
+    flex: none;
+    place-items: center;
+    width: 44px;
+    height: 44px;
+    border-radius: 13px;
+    color: hsl(var(--primary));
+    background-color: hsl(var(--secondary));
+    box-shadow: inset 0 0 0 1px hsl(var(--border) / 0.8);
+  }
+  .tag-pill {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    white-space: nowrap;
+    border-radius: 9999px;
+    padding: 3px 10px;
+    font-size: 12.5px;
+    font-weight: 600;
+    color: hsl(var(--muted-foreground));
+    background-color: hsl(var(--muted));
+    box-shadow: inset 0 0 0 1px hsl(var(--border) / 0.7);
+  }
+
+  /*
+   * Bar glass — for `fixed` chrome that re-blurs on every scroll frame.
+   *
+   * Smaller radius, and `contain: paint` so the compositor can treat the bar as a
+   * sealed region instead of re-reasoning about the whole page behind it. The
+   * float shadow is dropped to a single hairline: a bar pinned to the top of the
+   * viewport has no gap to cast into, and the wide shadow was the most expensive
+   * part of the stack on a surface that is always on screen.
+   */
+  .lg-bar {
+    --lg-blur: var(--lg-blur-bar);
+    contain: paint;
+    /*
+     * iOS 27 also changed what happens when content scrolls UNDER a floating
+     * bar: rather than the bar staying clear and the text underneath showing
+     * through it, a uniform toolbar appears across the top. That is what
+     * `solid` does in site-nav.tsx — the bar has no material at all over the
+     * hero, and becomes one continuous surface the moment anything scrolls
+     * beneath it. The clarity here is deliberately pushed up for the same
+     * reason: a bar has running text passing under it all day, which is the
+     * worst case for legibility on glass.
+     */
+    --lg-tint-max: var(--lg-tint-max-bar);
+    --lg-clarity-bump: 0.4;
+    /*
+     * One line under the bar, not three. This carried an inset shade, an outer
+     * bright line and an outer dark line at the same edge, which stacked into
+     * the same double border the panels had.
+     */
+    /*
+     * ONE line under the bar.
+     *
+     * This is the exception to the "no edge in box-shadow" rule that `.lg`
+     * states, and it is not an oversight. `.lg-bar::before` paints a TOP rim
+     * only — a full ring on a full-bleed element draws two vertical strokes at
+     * the viewport edges that look like a rendering fault — so the bottom, the
+     * one edge of a pinned bar anybody can actually see, has no rim to double
+     * against. Removing this line left the bar with no boundary at all and the
+     * page text running straight into it.
+     *
+     * It had three lines at this edge once: an inset shade, an outer bright
+     * line and an outer dark one. That was the doubling. One is correct.
+     */
+    box-shadow:
+      0 1px 0 0 rgb(var(--lg-shade) / var(--lg-edge-alpha)),
+      0 6px 20px -12px hsl(var(--lg-shadow) / 0.2);
+  }
+
+  /* A bar has no left/right/bottom edge on screen, so it gets a top hairline
+     only — a full ring around a full-bleed element draws two vertical lines at
+     the viewport edges that look like a rendering fault. */
+  .lg-bar::before {
+    padding: 1px 0 0;
+    background: linear-gradient(
+      90deg,
+      rgb(var(--lg-rim) / var(--lg-rim-alpha-low)) 0%,
+      rgb(var(--lg-rim) / var(--lg-rim-alpha)) 30%,
+      rgb(var(--lg-rim) / var(--lg-rim-alpha)) 70%,
+      rgb(var(--lg-rim) / var(--lg-rim-alpha-low)) 100%
+    );
+  }
+
+  /*
+   * THE SELECTION LENS — glass for the selected thing INSIDE a glass surface.
+   *
+   * The current page in the nav, the chosen segment of a segmented control
+   * (the /prayer-times tabs, the theme switch), "Today" in the day nav, the
+   * chosen gallery album. Apple marks these with what looks like a second
+   * piece of glass sitting on the first, and copying that literally is the
+   * one way to ruin it: a nested `backdrop-filter` samples a backdrop its
+   * parent has ALREADY tinted and blurred, so the two multiply into a murky
+   * patch with a hard seam, and the blur is paid for twice.
+   *
+   * So the lens has no backdrop-filter at all. It is the same material minus
+   * the sampling, painted over whatever the parent already resolved. Phase 2
+   * Task 12f tuned it toward Apple's iOS 26/27 lens, one cue per layer:
+   *
+   *   BODY      the element: the context's wash (`--chip-wash`) under a clear
+   *             vertical fade of `--chip-tint` (`--chip-top` to
+   *             `--chip-bottom`), so the bar shows through. Clear, not milky.
+   *   DEPTH     the element's box-shadow: one close, soft drop shadow (2 px
+   *             down, small blur, low alpha, negative spread). Not a ring.
+   *   RIM       `::before`, the ONE edge: a 1px specular hairline brightest at
+   *             the top-left, fading round the shape to a faint darker run at
+   *             the lower right (thickness), with a last glint at the far
+   *             corner where light leaves the lens.
+   *   LIGHT     `::after`: a highlight band across the top (light from
+   *             above), a glint at `--lg-lx` / `--lg-ly` (inside the nav it
+   *             follows the bar's pointer-driven light), and a faint darker
+   *             lower-inner edge.
+   *   LENSING   `.lens-label`: the label inside a lens is magnified 1.04, as
+   *             if seen through a convex lens (static, so it stays crisp).
+   *   MOTION    `.lens-slider`: one more lens per control that springs between
+   *             items and stretches along its travel (components/ui/
+   *             lens-glide.ts); a press swells the lens to 1.04 and brightens
+   *             the rim.
+   *
+   * Every number is a `--chip-*` variable (defaults with the other glass
+   * tokens at the top of this section), so a context restyles every lens in
+   * it at once: `.lg-nav` (the bar), `.lens-on-sky` (the day nav),
+   * `.lens-teal` (the gallery's filter row). Lite: a flat near-opaque pill
+   * (`--chip-solid`), rim kept, no inner light, no motion (LITE-TIER-
+   * UNLAYERED). Reduced motion: every change is instant. Contrast of every
+   * label on every lens: tests/unit/lens-material.test.ts. The gold next-
+   * prayer lens (`.lg-lens`, above) is its own material and is unchanged.
+   */
+  .lg-chip {
+    position: relative;
+    isolation: isolate;
+    background-color: var(--chip-wash);
+    background-image: linear-gradient(180deg, rgb(var(--chip-tint) / var(--chip-top)), rgb(var(--chip-tint) / var(--chip-bottom)));
+    box-shadow:
+      0 1px 1.5px rgb(var(--chip-shadow) / calc(var(--chip-shadow-a) * 0.8)),
+      0 2px 8px -3px rgb(var(--chip-shadow) / var(--chip-shadow-a));
+  }
+  .lg-chip::before {
+    content: "";
+    position: absolute;
+    inset: 0;
+    z-index: -1;
+    border-radius: inherit;
+    padding: 1px;
+    background: linear-gradient(
+      150deg,
+      rgb(255 255 255 / calc(var(--chip-rim-a) * var(--chip-press))) 0%,
+      rgb(255 255 255 / calc(var(--chip-rim-a) * 0.5 * var(--chip-press))) 22%,
+      rgb(255 255 255 / var(--chip-rim-low)) 48%,
+      rgb(var(--chip-shade) / calc(var(--chip-shade-a) * 1.5)) 80%,
+      rgb(255 255 255 / calc(var(--chip-rim-low) * 1.2 * var(--chip-press))) 100%
+    );
+    -webkit-mask:
+      linear-gradient(#000 0 0) content-box,
+      linear-gradient(#000 0 0);
+    mask:
+      linear-gradient(#000 0 0) content-box,
+      linear-gradient(#000 0 0);
+    -webkit-mask-composite: xor;
+    mask-composite: exclude;
+    pointer-events: none;
+    transition: opacity 220ms cubic-bezier(0.16, 1, 0.3, 1);
+  }
+  .lg-chip::after {
+    content: "";
+    position: absolute;
+    inset: 0;
+    z-index: -1;
+    border-radius: inherit;
+    background:
+      radial-gradient(
+        60% 110% at calc(var(--lg-lx) * 1%) calc(var(--lg-ly) * 1%),
+        rgb(255 255 255 / var(--chip-spec-a)) 0%,
+        rgb(255 255 255 / 0) 64%
+      ),
+      linear-gradient(180deg, rgb(255 255 255 / var(--chip-band-a)) 0%, rgb(255 255 255 / 0) 44%),
+      linear-gradient(0deg, rgb(var(--chip-shade) / var(--chip-shade-a)) 0%, rgb(var(--chip-shade) / 0) 30%);
+    pointer-events: none;
+    transition: opacity 220ms cubic-bezier(0.16, 1, 0.3, 1);
+  }
+
+  /*
+   * THE CONTROLS THE LENS LIVES IN. A `.lens-track` holds `.lens-item`s;
+   * the selected item also carries `.lg-chip` (server-rendered where the
+   * selection is known, so it works with no JavaScript). An unselected item
+   * under the pointer, or focused, shows the faint flat lens. The swell on
+   * press is the standalone `scale` property, so it never fights a
+   * call-site transform.
+   */
+  .lens-track {
+    position: relative;
+  }
+  .lens-item {
+    position: relative;
+    /* Hover changes the lens instantly; only transform-class properties
+       animate (the swell below). */
+    transition: scale 220ms var(--lens-spring);
+  }
+  /* The hover lens's faint inset ring, plus any Tailwind focus ring the item
+     carries (the capsule's links: `focus-visible:ring-2`). This rule is three
+     selectors deep, so a plain `box-shadow` here would beat the ring utility
+     and hide it; the ring's variables default to nothing on every element. */
+  .lens-item:not(.lg-chip):hover,
+  .lens-item:not(.lg-chip):focus-visible {
+    background-color: var(--chip-hover);
+    box-shadow: inset 0 0 0 1px var(--chip-hover-ring), var(--tw-ring-offset-shadow, 0 0 #0000), var(--tw-ring-shadow, 0 0 #0000);
+  }
+  @media (hover: hover) and (pointer: fine) {
+    .lens-item.lg-chip:active {
+      scale: 1.04;
+      --chip-press: 1.5;
+    }
+  }
+  /* The label seen through the lens: 1.04, static (crisp), springing in
+     when the sliding lens arrives under it. Inline-flex, because `scale`
+     does nothing on an inline box. */
+  .lens-label {
+    display: inline-flex;
+    align-items: center;
+    transition: scale 260ms var(--lens-spring);
+  }
+  .lg-chip > .lens-label,
+  .lens-track[data-slide="on"] .lens-item:hover > .lens-label {
+    scale: 1.04;
+  }
+
+  /*
+   * The sliding lens: one decorative `.lg-chip` per control, out of the flow
+   * and under the items. Invisible until it is needed: on hover controls
+   * (the nav, the day nav) it follows a fine pointer between items, and the
+   * flat hover lens steps aside; on select controls (tabs, theme switch) it
+   * carries the selection from the old item to the new one, then hands back
+   * to the static lens (`data-glide`). Only transforms animate: `translate`
+   * on the spring, `scale` for the stretch along the travel and the width
+   * change (FLIP: the width snaps, scaleX covers it), and opacity. Never
+   * layout, never a backdrop-filter. components/ui/lens-glide.ts writes
+   * --x/--y/--w/--h/--sx on the slider itself.
+   */
+  .lens-slider {
+    position: absolute;
+    left: 0;
+    top: var(--y, 0px);
+    width: var(--w, 0px);
+    height: var(--h, 0px);
+    translate: var(--x, 0px) 0;
+    scale: calc(var(--sx, 1) * var(--ps, 1)) var(--ps, 1);
+    opacity: 0;
+    pointer-events: none;
+    transition-property: translate, scale, opacity;
+    transition-duration: 560ms, 420ms, 160ms;
+    transition-timing-function: var(--lens-spring), var(--lens-spring), ease-out;
+  }
+  .lens-slider[data-on="true"] {
+    opacity: 1;
+  }
+  /* A select control's slider appears and leaves in one frame: it lands
+     exactly on the static lens, so a fade would double the two. */
+  .lens-slider[data-mode="select"] {
+    transition-property: translate, scale;
+    transition-duration: 560ms, 420ms;
+  }
+  /* A hover lens (the nav, the day nav) moves on every pointer pass, so it
+     travels for less time on the same spring (Apple design review #5, HIG
+     Motion: brief feedback for frequent interactions). Select controls keep
+     the full 560ms above. */
+  .lens-slider:not([data-mode="select"]) {
+    transition-duration: 380ms, 300ms, 140ms;
+  }
+  /* No hover ring under the sliding lens; a focus ring stays. */
+  .lens-track[data-slide="on"] .lens-item:not(.lg-chip):hover {
+    background-color: transparent;
+    box-shadow: var(--tw-ring-offset-shadow, 0 0 #0000), var(--tw-ring-shadow, 0 0 #0000);
+  }
+  @media (hover: hover) and (pointer: fine) {
+    .lens-track:has(.lens-item:active) .lens-slider {
+      --ps: 1.04;
+      --chip-press: 1.5;
+    }
+  }
+  /* While the slider carries the selection, the destination's own lens
+     waits (the label is already there and magnified). */
+  .lens-track[data-glide="on"] .lens-item.lg-chip {
+    background-color: transparent;
+    background-image: none;
+    box-shadow: none;
+  }
+  .lens-track[data-glide="on"] .lens-item.lg-chip::before,
+  .lens-track[data-glide="on"] .lens-item.lg-chip::after {
+    opacity: 0;
+  }
+
+  /*
+   * THE SKY'S LENS: the day nav on the /prayer-times band. The sky is the
+   * same in both themes, so every variable is set (nothing leaks in from
+   * the page's theme). "Today" is the bright lens Apple puts on a dark
+   * control: near-white glass with teal text. The sliding lens over the
+   * light-text links is the clear one, barely tinted, so those labels stay
+   * AA over every prayer's sky.
+   */
+  .lens-on-sky {
+    --chip-tint: 246 248 248;
+    --chip-top: 0.97;
+    --chip-bottom: 0.86;
+    --chip-wash: transparent;
+    --chip-rim-a: 1;
+    --chip-rim-low: 0.4;
+    --chip-band-a: 0.6;
+    --chip-spec-a: 0.5;
+    --chip-shade: 19 35 42;
+    --chip-shade-a: 0.1;
+    --chip-shadow: 2 8 12;
+    --chip-shadow-a: 0.45;
+    --chip-hover: rgb(246 248 248 / 0.1);
+    --chip-hover-ring: rgb(246 248 248 / 0.2);
+    --chip-solid: #f6f8f8;
+  }
+  .lens-on-sky .lens-slider {
+    --chip-top: 0.08;
+    --chip-bottom: 0.02;
+    --chip-rim-a: 0.55;
+    --chip-rim-low: 0.1;
+    --chip-band-a: 0.05;
+    --chip-spec-a: 0.04;
+    --chip-shade: 0 0 0;
+    --chip-shade-a: 0.18;
+  }
+
+  /*
+   * A filter row on the page itself (the gallery's albums): a TINTED lens,
+   * Apple's prominent selected glass. The wash is the full primary teal and
+   * the white light over it is kept low, so the chosen chip is clearly
+   * darker than the page and its light label (primary-foreground) stays AA
+   * with every layer at peak.
+   */
+  .lens-teal {
+    --chip-wash: hsl(var(--primary));
+    --chip-top: 0.08;
+    --chip-bottom: 0;
+    --chip-band-a: 0.06;
+    --chip-spec-a: 0.05;
+    --chip-solid: hsl(var(--primary));
+  }
+  /* Dark: the teal is the light one under dark text, so the lower-inner
+     shade (0.3 by default) is held down to keep the label AA. */
+  .dark .lens-teal,
+  .lg-dark .lens-teal {
+    --chip-shade-a: 0.1;
+  }
+
+  /*
+   * AN ADMIN SELECTION CONTROL on a card (the Team page's "Problems only"):
+   * the nav bar's faint teal wash under a clear body, set as a named context
+   * so the material is not restyled inline. Every variable the dark lens
+   * needs is set here, so nothing leaks in from the theme. Label stays
+   * `text-foreground`, AA in both themes (tests/unit/lens-material.test.ts).
+   */
+  .lens-admin {
+    --chip-wash: hsl(var(--primary) / 0.1);
+    --chip-top: 0.5;
+    --chip-bottom: 0.1;
+    --chip-solid: hsl(var(--secondary));
+  }
+  .dark .lens-admin,
+  .lg-dark .lens-admin {
+    --chip-wash: hsl(var(--primary) / 0.08);
+    --chip-top: 0.03;
+    --chip-bottom: 0;
+    --chip-band-a: 0.05;
+    --chip-spec-a: 0.05;
+  }
+
+  /* Reduced transparency: the lens is its solid pill, no inner light. */
+  @media (prefers-reduced-transparency: reduce) {
+    .lg-chip {
+      background-image: none;
+      background-color: var(--chip-solid, hsl(var(--card)));
+    }
+    .lg-chip::after {
+      display: none;
+    }
+  }
+
+  /* Reduced motion: no slide, no stretch, no swell, no springing label. */
+  @media (prefers-reduced-motion: reduce) {
+    .lens-slider {
+      display: none;
+    }
+    .lens-item,
+    .lens-label {
+      transition: none;
+    }
+    .lens-item.lg-chip:active {
+      scale: none;
+    }
+  }
+
+  /*
+   * Interactive glass — controls. Apple's glass responds to touch: it brightens,
+   * the highlight shifts toward the pointer, and it compresses very slightly on
+   * press. The compression is the part people read as "physical"; skip it and a
+   * glass button feels like a picture of a button.
+   */
+  .lg-interactive {
+    transition:
+      background-color 200ms ease-out,
+      box-shadow 200ms ease-out,
+      scale 160ms cubic-bezier(0.16, 1, 0.3, 1);
+    /* No will-change (owner, 6 Nov 2026, screen recording): a permanently
+       promoted layer per control is redrawn out of step with the page while
+       iOS Safari scrolls, so buttons ghosted and flickered. The 160 ms press
+       promotes on its own. */
+  }
+
+  .lg-interactive:hover {
+    --lg-clarity-bump: 0.14;
+    --lg-sheen-bump: 0.18;
+  }
+
+  .lg-interactive:active {
+    /*
+     * The standalone `scale` property, NOT `transform: scale()`.
+     *
+     * `transform` is one slot: setting it here replaces whatever the call site
+     * already had. The gallery lightbox centres its prev/next arrows with
+     * `-translate-y-1/2`, so a `transform` press state silently dropped the
+     * centring and the arrow jumped half its own height down the screen the
+     * moment you clicked it. `scale` is an independent property that composes
+     * with any existing transform, so a glass control can be positioned however
+     * its layout needs and still press.
+     */
+    scale: 0.975;
+    /*
+     * A separate multiplier, not `calc(var(--lg-rim-alpha) * 0.7)`. That reads
+     * naturally and is a cycle — a custom property may not reference itself, so
+     * the declaration is invalid at computed-value time and quietly falls back
+     * to the inherited value. The rim would never have dimmed and nothing would
+     * have reported it. Same trap as `--lg-clarity-bump` above.
+     */
+    --lg-press: 0.62;
+  }
+
+  /*
+   * Concentric radii. Apple nests glass inside glass by making the inner radius
+   * equal the outer radius minus the gap between them, so the two curves stay
+   * parallel. Set `--lg-r` on the parent and the child reads it.
+   */
+  .lg-concentric {
+    border-radius: calc(var(--lg-r, 1.5rem) - var(--lg-gap, 0.5rem));
+  }
+
+  /*
+   * NO `corner-shape: squircle`, and this is a decision, not an omission.
+   *
+   * Apple's corners are superellipses, so it looked like free authenticity. It
+   * cost two bugs instead:
+   *
+   *   1. `corner-shape` is NOT inherited. Set on `.lg` alone it clipped the
+   *      surface to a squircle while `::before` — which paints the rim — stayed
+   *      a circular-arc rounded rect. Two outlines over one box, meeting
+   *      mid-edge and separating toward the corners. That is the "double
+   *      border" that survived three rounds of tuning the rim colours, because
+   *      it was never a colour problem.
+   *   2. Once every control became a capsule (`border-radius: 9999px`), a
+   *      squircle at that radius is a rounded SQUARE, not a pill. So the glass
+   *      controls rendered as rounded rectangles beside identical non-glass
+   *      buttons that were proper capsules — the exact inconsistency the
+   *      capsule change existed to remove.
+   *
+   * A superellipse is only visible at mid-range radii, which this design no
+   * longer uses: controls are capsules and cards keep `--radius`. There is
+   * nothing left for it to improve, and it silently breaks anything that draws
+   * on the boundary. Leave it out.
+   */
+  /* ===========================================================================
+     Shaped glass — the material on a boundary that is not a box
+     ======================================================================== */
+
+  /*
+   * The Mihrab board's cards are arches: an ogee point on top, a pointed foot
+   * on the lower pair, a capsule for the date. `border-radius` draws none of
+   * them, and that matters twice over for this material:
+   *
+   *   1. THE SURFACE. A backdrop blur and a tint are painted over the
+   *      element's box, so the shape is a `clip-path: path()` the component
+   *      computes in pixels from its measured box (lib/display/mihrab-
+   *      geometry.ts) and hands over as `--lg-shape`. The clip also cuts the
+   *      sheen and the rim, so every layer of the surface ends on one line.
+   *   2. THE EDGE. `.lg::before` paints its rim as a ring masked out of the
+   *      border box, which on an arch would draw a SECOND, boxy outline across
+   *      the cap: the `border-radius` / `corner-shape` trap in another form
+   *      (anything drawing on a glass boundary must follow that boundary). So
+   *      `::before` keeps its job here (it is still the surface's one and only
+   *      edge) but takes its ring from the same path, stroked into an SVG mask
+   *      (`--lg-shape-rim`, a data URI the component builds with the clip).
+   *      The stroke is centred on the path and the clip removes its outer
+   *      half, so the rim lies wholly inside the shape at the asked width.
+   *
+   * Nothing else may touch the boundary: no `border`, no `ring`, no inset
+   * shadow. The float shadow goes too, because the clip would cut it off at
+   * the shape; the component draws depth (and a selected card's warm glow)
+   * BEHIND the surface, as blurred copies of the same path.
+   *
+   * The tint is in the board's own HSL tokens rather than `--lg-tint`'s RGB
+   * triple, so an admin recolouring the board recolours its glass. The three
+   * colours are registered (`@property`, after this layer) so a card turning
+   * into the selection lens fades across rather than snapping.
+   *
+   * Until the component has measured its box there is no path, and an
+   * unclipped surface would flash a rectangle, so it stays hidden until then.
+   */
+  .lg-shaped {
+    --lg-shape: none;
+    --lg-shape-rim: linear-gradient(transparent, transparent);
+    --lg-shaped-tint: 0 0% 100%;
+    --lg-shaped-alpha: 0.45;
+    --lg-shaped-fill: hsl(var(--lg-shaped-tint) / var(--lg-shaped-alpha));
+    --lg-shaped-edge: rgb(var(--lg-shade) / 0.3);
+    --lg-shaped-glint: rgb(var(--lg-rim) / var(--lg-rim-alpha));
+    clip-path: var(--lg-shape);
+    background-color: var(--lg-shaped-fill);
+    box-shadow: none;
+    transition:
+      --lg-shaped-fill 900ms cubic-bezier(0.16, 1, 0.3, 1),
+      --lg-shaped-edge 900ms cubic-bezier(0.16, 1, 0.3, 1),
+      --lg-shaped-glint 900ms cubic-bezier(0.16, 1, 0.3, 1);
+  }
+
+  .lg-shaped:not([data-shaped="true"]) {
+    visibility: hidden;
+  }
+
+  .lg-shaped::before {
+    padding: 0;
+    background: linear-gradient(
+      145deg,
+      var(--lg-shaped-glint) 0%,
+      var(--lg-shaped-edge) 26%,
+      var(--lg-shaped-edge) 74%,
+      var(--lg-shaped-glint) 100%
+    );
+    -webkit-mask: var(--lg-shape-rim) center / 100% 100% no-repeat;
+    mask: var(--lg-shape-rim) center / 100% 100% no-repeat;
+    -webkit-mask-composite: source-over;
+    mask-composite: add;
+  }
+
+  /*
+   * The selection lens for a shaped surface: a brighter specular pool across
+   * the top of the card, warm, on its own layer so it can FADE in as the
+   * highlight arrives. It has no backdrop-filter (the rule `.lg-chip` sets
+   * out): it lies inside a surface that already samples its backdrop, and a
+   * second sample would go murky. Under the clip, so it ends at the shape.
+   */
+  .lg-shaped-lens {
+    position: absolute;
+    inset: 0;
+    z-index: -1;
+    pointer-events: none;
+    background:
+      radial-gradient(
+        130% 46% at 32% -4%,
+        rgb(255 250 236 / 0.9) 0%,
+        rgb(255 250 236 / 0) 64%
+      ),
+      radial-gradient(
+        90% 40% at 70% 104%,
+        rgb(255 246 222 / 0.35) 0%,
+        rgb(255 246 222 / 0) 62%
+      );
+    mix-blend-mode: screen;
+    opacity: 0;
+    transition: opacity 900ms cubic-bezier(0.16, 1, 0.3, 1);
+  }
+
+  [data-selected="true"] > .lg-shaped-lens {
+    opacity: 1;
+  }
+
+  /*
+   * The Mihrab board's glass (app/display, template "mihrab"). Thin and warm:
+   * the poster's cards are fine outlines on stone, so this is a premium touch
+   * on that look, not frosted plastic. The backdrop behind every card is a
+   * smooth stone gradient, so a big blur radius buys nothing visible and is
+   * kept small (a kiosk GPU pays for it on every frame of the burn-in drift);
+   * what reads is the slight lift in saturation and light, the rim catching
+   * the glow at its top-left, and the sheen.
+   */
+  .kiosk-mihrab .lg-shaped {
+    --lg-blur: 0.8vmin;
+    --lg-sat: 118%;
+    --lg-bright: 1.03;
+    --lg-contrast: 0.97;
+    --lg-rim: 255 250 240;
+    --lg-sheen-alpha: 0.34;
+    --lg-shaped-tint: var(--mih-card);
+    --lg-shaped-alpha: 0.4;
+    --lg-shaped-edge: hsl(var(--mih-card-line) / 0.85);
+    --lg-shaped-glint: hsl(var(--mih-frame-light));
+  }
+
+  /* The date pill: deep green glass over the dunes, rimmed in light gold. */
+  .kiosk-mihrab .lg-shaped[data-tone="green"] {
+    --lg-shaped-tint: var(--mih-green);
+    --lg-shaped-alpha: 0.9;
+    --lg-shaped-edge: hsl(var(--mih-gold-light) / 0.8);
+    --lg-shaped-glint: hsl(var(--mih-frame-light));
+    --lg-sheen-alpha: 0.16;
+  }
+
+  /* Friday: the Jummah card's rim turns gold for the day. */
+  .kiosk-mihrab .lg-shaped[data-emphasis="true"] {
+    --lg-shaped-edge: hsl(var(--mih-highlight));
+  }
+
+  /*
+   * THE NEXT PRAYER, as a raised gold lens: the card's own glass re-tinted to
+   * the board's gold (the move `.lg-chip` makes on the prayer board's next
+   * row), a gold rim with a bright glint, the warm specular pool above, and,
+   * drawn by the component behind it, a soft gold glow and a deeper shadow
+   * as it lifts. Every part is on a transition, so the lens fades from one
+   * card to the next rather than jumping; reduced motion collapses them.
+   */
+  .kiosk-mihrab .lg-shaped[data-selected="true"] {
+    --lg-shaped-tint: var(--mih-highlight);
+    --lg-shaped-alpha: 0.17;
+    --lg-shaped-edge: hsl(var(--mih-highlight));
+    --lg-shaped-glint: rgb(255 247 226);
+  }
+
+  @media (prefers-reduced-transparency: reduce) {
+    .lg-shaped[data-shaped] {
+      --lg-shaped-alpha: 1;
+    }
+    .lg-shaped-lens {
+      display: none;
+    }
+  }
+
+  /* `.lg` adds a box outline under more contrast; on a shape it would be a
+     second, rectangular edge. The rim is driven hard instead. */
+  @media (prefers-contrast: more) {
+    .lg-shaped[data-shaped] {
+      outline: none;
+      --lg-shaped-glint: var(--lg-shaped-edge);
+    }
+  }
+
+  /* ===========================================================================
+     Refraction — the real thing, where the browser can do it
+     ======================================================================== */
+
+  /*
+   * This is the one part of Liquid Glass that has no cheap CSS equivalent:
+   * content behind the surface visibly BENDING, rather than merely blurring.
+   *
+   * It needs an SVG filter referenced from `backdrop-filter`, which today is
+   * Chromium only — Firefox implements backdrop-filter but not `url()` inside it,
+   * and Safari drops the declaration. So it is applied through a root attribute
+   * that components/ui/glass.tsx sets only after testing for it at runtime; the
+   * `@supports` guard alone is not enough, because browsers claim support for the
+   * property while ignoring the filter reference.
+   *
+   * Everything below is additive. Without it the surface is still glass — it just
+   * does not ripple.
+   */
+  [data-lg-refract="on"] .lg-refract {
+    /*
+     * REFRACTION AND DIFFUSION ARE MUTUALLY EXCLUSIVE, and that is the whole
+     * reason this rule overrides the blur.
+     *
+     * Bending the backdrop only shows if the backdrop still HAS detail to
+     * bend. Measured on the bench: the lens is obvious at 6px of blur, clear
+     * at 12px, marginal at 18px, and at the site default of 28px it is
+     * completely invisible — the blur has already destroyed every spatial
+     * frequency the displacement would have moved. A `refract` surface at the
+     * default blur is a no-op that costs a full SVG filter pass per frame.
+     *
+     * So a refracting surface trades diffusion for lensing. It keeps its tint
+     * and its rim; it just cannot also be the surface that smears a busy
+     * photograph into a wash. Pick one per surface. In practice that means
+     * refraction belongs on chrome over quiet backdrops, and the heavy blur
+     * belongs on bars with running text passing under them.
+     *
+     * `url()` must come LAST in the filter list.
+     */
+    --lg-blur: 10px;
+    -webkit-backdrop-filter: blur(var(--lg-blur)) saturate(var(--lg-sat))
+      brightness(var(--lg-bright)) contrast(var(--lg-contrast))
+      url("#lg-edge-lens");
+    backdrop-filter: blur(var(--lg-blur)) saturate(var(--lg-sat))
+      brightness(var(--lg-bright)) contrast(var(--lg-contrast))
+      url("#lg-edge-lens");
+  }
+
+  /*
+   * THE CAPSULE'S LIP (`.nav-lip`, the CAPSULE-NAV block) samples no
+   * backdrop. It used to run 1px of blur and, on Chromium, an SVG edge lens
+   * (`#nav-lens`); since the frosted body lost its rim mask (f156113) it
+   * covers the lip edge to edge and re-blurs everything at 16px, so the
+   * lip's filter was a second glass pass under the first with nothing left
+   * to see (Apple design review #1, 22 Oct 2026). It carries the float
+   * shadow only. tests/unit/glass-polish.test.ts keeps a filter off it.
+   */
+
+  /* ===========================================================================
+     Degradation — every one of these produces a usable, near-identical surface
+     ======================================================================== */
+
+  /*
+   * Browsers with no backdrop-filter at all. The tint has to carry legibility on
+   * its own, so it goes nearly opaque. The rim and sheen are kept: they are what
+   * make the surface look intentional rather than like a failed effect.
+   */
+  @supports not ((backdrop-filter: blur(1px)) or (-webkit-backdrop-filter: blur(1px))) {
+    .lg {
+      --lg-clarity: 1;
+      --lg-tint-max: 0.94;
+    }
+    .dark .lg,
+    .lg-dark .lg {
+      --lg-clarity: 1;
+      --lg-tint-max: 0.92;
+    }
+    .lg-clear {
+      --lg-clarity: 1;
+      --lg-tint-max: 0.8;
+    }
+  }
+
+  /*
+   * `prefers-reduced-transparency` is the accessibility setting that exists for
+   * exactly this material — vestibular and low-vision users for whom translucent
+   * chrome over moving content is genuinely hard to read. Honour it properly:
+   * opaque surface, no sheen, no blur. Not a reduced blur — none.
+   */
+  @media (prefers-reduced-transparency: reduce) {
+    .lg,
+    .lg-clear,
+    .lg-bar {
+      --lg-clarity: 1;
+      --lg-tint-max: 1;
+      --lg-blur: 0px;
+      --lg-bright: 1;
+      --lg-contrast: 1;
+      -webkit-backdrop-filter: none;
+      backdrop-filter: none;
+      background-image: none;
+    }
+    .lg::after {
+      display: none;
+    }
+    /* The refraction rule is two selectors deep and would put a filter back
+       on an opaque surface: none, as the blur. */
+    [data-lg-refract="on"] .lg-refract {
+      -webkit-backdrop-filter: none;
+      backdrop-filter: none;
+    }
+    /* The demo's night variants are two classes deep, so `.lg` alone would
+       lose to them: the night nav stays opaque, the night pane drops its image. */
+    .dark .lg-nav {
+      --lg-tint-max: 1;
+    }
+    .dark .lg-pane {
+      background-image: none;
+    }
+    /* The notices (no backdrop-filter, so not `.lg`): their solid colour alone. */
+    .lg-notice {
+      --notice-solid: 1;
+      background-image: none;
+    }
+    .lg-notice::after {
+      display: none;
+    }
+  }
+
+  /*
+   * `prefers-contrast: more` — the second accessibility setting iOS 27's glass
+   * adapts to, and a different problem from reduced transparency.
+   *
+   * Someone asking for more contrast has not asked for the translucency to go
+   * away; they have asked for the BOUNDARIES to be unambiguous. So the material
+   * survives — the tint goes to fully opaque so text sits on a known
+   * background, and the darkened outer edge is driven hard so every surface has
+   * a visible outline rather than a soft float. The blur stays, because at full
+   * tint it costs nothing visually and removing it would change the layout's
+   * character for no gain.
+   */
+  @media (prefers-contrast: more) {
+    .lg,
+    .lg-clear,
+    .lg-bar {
+      --lg-clarity: 1;
+      --lg-tint-max: 1;
+      --lg-rim-alpha: 1;
+      /* The one place a hard outer ring is wanted: an unambiguous boundary is
+         exactly what this preference asks for. */
+      outline: 1px solid rgb(var(--lg-shade) / 0.85);
+      outline-offset: -1px;
+    }
+    .lg::after {
+      display: none;
+    }
+    /* Two classes deep, like the night nav's 0.86, which it has to beat. */
+    .dark .lg-nav {
+      --lg-tint-max: 1;
+    }
+    /* The notices: their solid colour under the dark glass, outlined. */
+    .lg-notice {
+      --notice-solid: 1;
+      outline: 1px solid rgb(255 255 255 / 0.85);
+      outline-offset: -1px;
+    }
+    .lg-notice::after {
+      display: none;
+    }
+    .lg-notice[data-tint] {
+      --sky-wash: none;
+    }
+  }
+
+  /*
+   * The escape hatch. Setting `lg-off` on <html> reverts every glass surface on
+   * the page to an opaque tint in one class — the shape a visitor-facing
+   * "reduce transparency" toggle would take, and the thing to try first if a
+   * scroll-performance report comes in from a real visitor's device.
+   */
+  .lg-off .lg,
+  .lg-off .lg-clear,
+  .lg-off .lg-bar {
+    --lg-clarity: 1;
+    --lg-tint-max: 1;
+    --lg-blur: 0px;
+    --lg-bright: 1;
+    --lg-contrast: 1;
+    -webkit-backdrop-filter: none;
+    backdrop-filter: none;
+    background-image: none;
+  }
+
+  .lg-off .lg::after {
+    display: none;
+  }
+
+  .lg-off .lg-notice {
+    --notice-solid: 1;
+    background-image: none;
+  }
+
+  .lg-off .lg-notice::after {
+    display: none;
+  }
+
+  /* LITE-TIER:START */
+  /*
+   * THE LITE TIER (spec section 5). `lg-lite` on <html> comes from the head
+   * script (lib/perf/lite-mode.ts, run inside lib/theme/constants.ts), the
+   * frame-time probe or the visitor's Effects choice. Every glass surface on
+   * the public pages becomes a near-opaque tint of its own colour: no backdrop
+   * sample, no refraction, so nothing is re-blurred while the page scrolls.
+   * The rim, the sheen, the radii and the layout stay: the same design, solid.
+   * Modal scrims lose their blur, and entrances and ambient animation stop.
+   *
+   * It is the `lg-off` idea at 0.94 rather than fully opaque, the value the
+   * `@supports not (backdrop-filter)` fallback above already uses, except
+   * that reduced transparency, more contrast and `lg-off` still get 1.
+   * Scoped to `.site-public` (the public layout's wrapper), so the kiosk
+   * boards and the admin keep their material. Three classes of specificity: it beats
+   * `.lg-sky-card`, `.lg-bar` and the refraction rule without !important.
+   * tests/component/lite-glass.test.tsx reads exactly this block.
+   */
+  .lg-lite .site-public .lg,
+  .lg-lite .site-public .lg-clear,
+  .lg-lite .site-public .lg-bar {
+    --lg-clarity: 1;
+    --lg-clarity-bump: 0;
+    --lg-tint-max: 0.94;
+    --lg-blur: 0px;
+    -webkit-backdrop-filter: none;
+    backdrop-filter: none;
+  }
+
+  .lg-lite .site-public .lg-refract {
+    -webkit-backdrop-filter: none;
+    backdrop-filter: none;
+  }
+
+  /* The notices (Task 54) never had a backdrop-filter to drop, so the lite
+     tier leaves them exactly as the full tier paints them (Task 57 item 10):
+     their wash, dark glass, edge and glint. The strict modes' rules above
+     still make them solid. The panes (.lg-pane, .lg-pane-deep) keep their
+     gradients here too: their --lg-tint, painted at 0.94 above, is the
+     opaque stand-in for the blurred backdrop, not a near-black. */
+
+  /* Lite must not weaken the accessibility settings that make the tint fully
+     opaque: the same three-class selectors, so they win over the 0.94 above. */
+  @media (prefers-reduced-transparency: reduce) {
+    .lg-lite .site-public .lg,
+    .lg-lite .site-public .lg-clear,
+    .lg-lite .site-public .lg-bar {
+      --lg-tint-max: 1;
+    }
+  }
+
+  @media (prefers-contrast: more) {
+    .lg-lite .site-public .lg,
+    .lg-lite .site-public .lg-clear,
+    .lg-lite .site-public .lg-bar {
+      --lg-tint-max: 1;
+    }
+  }
+
+  /* The lg-off escape hatch still wins: four classes. */
+  .lg-lite.lg-off .site-public .lg,
+  .lg-lite.lg-off .site-public .lg-clear,
+  .lg-lite.lg-off .site-public .lg-bar {
+    --lg-tint-max: 1;
+  }
+  /* LITE-TIER:END */
+
+  /* Lite's capsule (outside the LITE-TIER block, which only ever drops a
+     backdrop-filter; this drops the frosted body's lift image, which would
+     grey an opaque tint). Lite is the solid tint, fully opaque. At the
+     tier's 0.94 the sky behind the capsule printed
+     through without the blur that used to hide it: a star from the band
+     showed as a 2px dot against the current link's lens and read as a dent
+     in its rim (owner, 21 Oct 2026, dark mode on /ramadan). */
+  .lg-lite .site-public .nav-glass {
+    --lg-tint-max: 1;
+    background-image: none;
+  }
+  /* The phone menu in the capsule's own Liquid Glass (owner, 29 Oct 2026):
+     the panel is clear, so the bar's frosted body runs down behind the
+     links. Lite (old or power-saving phones), lg-off, reduced transparency
+     and a browser without backdrop-filter keep the solid panel. */
+  @supports (backdrop-filter: blur(1px)) or (-webkit-backdrop-filter: blur(1px)) {
+    :root:not(.lg-lite):not(.lg-off) .site-public .nav-panel {
+      background-color: transparent;
+    }
+  }
+  /* Positive, not `not (...)`: Safari does not know this feature, and an
+     unknown query under `not` would never match there. */
+  @media (prefers-reduced-transparency: reduce) {
+    :root:not(.lg-lite):not(.lg-off) .site-public .nav-panel {
+      background-color: hsl(var(--background));
+    }
+  }
+
+  /* Reduced motion keeps the material but drops the press compression — the
+     surface still responds, through tint alone. */
+  @media (prefers-reduced-motion: reduce) {
+    .lg-interactive:active {
+      scale: 1;
+    }
+  }
+}

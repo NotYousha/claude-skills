@@ -1,0 +1,13 @@
+{
+  "$schema": "https://json.schemastore.org/claude-code-marketplace.json",
+  "name": "notyousha-skills",
+  "owner": { "name": "Yousha Ahmed", "url": "https://github.com/NotYousha" },
+  "plugins": [
+    {
+      "name": "web-liquid-glass",
+      "source": "./",
+      "description": "Apple-style Liquid Glass for websites (CSS, React, Next.js, Tailwind): the material, its traps, and production reference code.",
+      "category": "design"
+    }
+  ]
+}

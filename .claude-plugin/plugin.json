@@ -1,0 +1,10 @@
+{
+  "$schema": "https://json.schemastore.org/claude-code-plugin-manifest.json",
+  "name": "web-liquid-glass",
+  "description": "Apple-style Liquid Glass for websites (CSS, React, Next.js, Tailwind): the material, its traps, and production reference code.",
+  "version": "1.0.0",
+  "author": { "name": "Yousha Ahmed", "url": "https://github.com/NotYousha" },
+  "repository": "https://github.com/NotYousha/claude-skills",
+  "license": "MIT",
+  "keywords": ["liquid-glass", "glassmorphism", "css", "tailwind", "nextjs", "react", "design"]
+}
