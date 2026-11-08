@@ -2,7 +2,7 @@
 
 ## web-liquid-glass
 
-Apple-style Liquid Glass for websites: CSS, React, Next.js and Tailwind. It covers the four parts of the material, the traps that make web glass look cheap or glitch, and about 3,000 lines of production reference code from a live site.
+Apple-style Liquid Glass for websites: CSS, React, Next.js and Tailwind. It covers the four parts of the material, the traps that make web glass look cheap or glitch, about 3,000 lines of production reference code from a live site, and when to use the Glisse component library (by Kelvin Zhang) instead.
 
 Install it inside Claude Code:
 

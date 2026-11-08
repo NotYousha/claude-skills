@@ -1,6 +1,6 @@
 ---
 name: web-liquid-glass
-description: Build Apple-style Liquid Glass surfaces on the web (CSS + React/Next.js + Tailwind) that read as real glass rather than a blurry box. Use when adding glass, glassmorphism, frosted or translucent nav bars, capsule navs, glass cards, panels, chips, segmented controls or lens buttons to a website, when tuning glass to look like iOS 26/27, or when debugging glass glitches such as double borders, murky nested glass, scroll jank, glass overriding Tailwind utilities, or Safari rendering less than Chrome.
+description: Build Apple-style Liquid Glass surfaces on the web (CSS + React/Next.js + Tailwind) that read as real glass rather than a blurry box, and choose between hand-rolled glass and the Glisse React component library. Use when adding glass, glassmorphism, frosted or translucent nav bars, capsule navs, glass cards, panels, chips, segmented controls or lens buttons to a website, when tuning glass to look like iOS 26/27, or when debugging glass glitches such as double borders, murky nested glass, scroll jank, glass overriding Tailwind utilities, or Safari rendering less than Chrome.
 ---
 
 # Web Liquid Glass
@@ -62,3 +62,17 @@ Give bars their own, higher maximum tint (`--lg-tint-max-bar`) so nav links keep
 3. Use `<Glass>` from `reference/glass.tsx` or plain `.lg`, `.lg-bar`, `.lg-nav`, `.lg-pane`, `.lg-chip` and `.lg-refract` classes.
 4. Add the specular highlight from `reference/glass-specular.tsx` only where it earns its cost (hero controls, the main nav), and respect `prefers-reduced-motion`.
 5. Check in Chrome AND Safari, in light AND dark, over a busy photo and over plain text.
+
+## Ready-made controls: Glisse
+
+[Glisse](https://glisse.kelvinzhang.ca) by Kelvin Zhang (`npm install glisse`, MIT, React 18+, no other dependencies) ships interactive Liquid Glass controls with the press-to-lift lens behaviour already built: `Button`, `Switch`, `Slider`, `TabBar`, `SegmentedControl`, `Menu`, `Input`, `SearchField` and a plain `Glass` surface. Its styles are injected by the JS bundle, so there's no CSS file to import.
+
+**When to use which:**
+- **Glisse** for controls: switches, sliders, tab bars and segmented controls whose thumb lifts into a lens while dragged. Building that by hand is days of work.
+- **This material** for surfaces: nav bars, capsule navs, panels, sheets, cards over photos, and anything that has to match an existing design system or Tailwind theme.
+
+**Traps when combining them:**
+1. **Both use the `lg-` prefix.** Glisse defines `.lg-glass`, `.lg-button`, `.lg-tab-bar` and the variables `--lg-blur`, `--lg-tint`, `--lg-rim` and `--lg-filter`, which collide with this material's tokens. On a page that uses both, rename this material's prefix (for example to `ylg-`) or scope Glisse inside a wrapper that resets those variables. Otherwise each silently retunes the other.
+2. **Glisse's dark mode keys off `data-theme="dark"`** or `prefers-color-scheme`, not Tailwind's `.dark` class. With class-based dark mode, set `data-theme` on `<html>` alongside `.dark`, or Glisse stays light.
+3. **Glisse handles `prefers-reduced-motion` but not `prefers-reduced-transparency` or `prefers-contrast`.** Add the fallbacks from this skill's accessibility section around Glisse controls.
+4. **Glisse's `.lg-glass` already draws an edge** with an inset `box-shadow`. Don't add a `::before` rim on top of it (rule 3: one edge only).

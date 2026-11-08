@@ -1,0 +1,82 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Claude Code Skills Guide</title>
+<style>
+  @page { size: Letter; margin: 0; }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    width: 8.5in; height: 11in; padding: 0.42in 0.5in 0.36in;
+    font: 8.6pt/1.36 "Segoe UI", system-ui, sans-serif; color: #1c2230; background: #fff;
+    -webkit-print-color-adjust: exact; print-color-adjust: exact;
+  }
+  header { display: flex; justify-content: space-between; align-items: flex-end;
+    border-bottom: 2px solid #1d2b53; padding-bottom: 7px; margin-bottom: 10px; }
+  h1 { font-size: 19pt; letter-spacing: -0.3px; color: #1d2b53; }
+  header p { color: #5b6476; font-size: 8.4pt; text-align: right; }
+  h2 { font-size: 8.4pt; text-transform: uppercase; letter-spacing: 1.1px; color: #fff;
+    background: #1d2b53; padding: 3px 8px; border-radius: 3px; margin: 9px 0 4px; }
+  h2.gold { background: #b0892f; }
+  table { width: 100%; border-collapse: collapse; }
+  td { padding: 3.6px 6px; vertical-align: top; border-bottom: 1px solid #e3e6ec; }
+  td.n { width: 1.55in; font-weight: 650; color: #1d2b53; }
+  td.n small { display: block; font-weight: 400; color: #7a8294; font-size: 7.2pt; }
+  td.u { width: 1.9in; color: #4a5263; font-size: 8pt; }
+  tr.own td { background: #fbf6ea; }
+  .note { margin-top: 9px; padding: 6px 9px; border-left: 3px solid #b0892f; background: #f6f7f9; font-size: 8pt; }
+  .head td { font-size: 7.2pt; text-transform: uppercase; letter-spacing: .8px; color: #7a8294; border-bottom: 1px solid #c9ced8; padding-top: 0; }
+  footer { margin-top: 7px; color: #7a8294; font-size: 7.4pt; display: flex; justify-content: space-between; }
+</style>
+</head>
+<body>
+<header>
+  <h1>Claude Code Skills Guide</h1>
+  <p>What each skill does and when it kicks in<br>Yousha Ahmed · November 2026</p>
+</header>
+
+<table>
+  <tr class="head"><td class="n" style="color:#7a8294;font-weight:400">Skill</td><td>What it does</td><td class="u" style="color:#7a8294">Kicks in when you…</td></tr>
+</table>
+
+<h2 class="gold">My own</h2>
+<table>
+  <tr class="own"><td class="n">web-liquid-glass<small>NotYousha/claude-skills</small></td><td>Apple-style Liquid Glass for websites, built from the real ICNL site code: the four parts of the material, nine traps (double borders, Tailwind layers, Safari limits) and about 3,000 lines of working CSS and React.</td><td class="u">add glass, frosted bars or capsule navs to a site, or fix glass glitches</td></tr>
+</table>
+
+<h2>Workflow and coding</h2>
+<table>
+  <tr><td class="n">Superpowers<small>obra</small></td><td>A set of working habits for Claude: brainstorm before building, write a plan, test first, debug step by step, and verify before saying "done".</td><td class="u">start any build, bug fix or feature</td></tr>
+  <tr><td class="n">diagnosing-bugs<small>mattpocock</small></td><td>A strict loop for hard bugs and slowdowns: reproduce, narrow down, prove the cause, then fix.</td><td class="u">say "debug this" or report something broken or slow</td></tr>
+  <tr><td class="n">Claude Code Setup<small>Anthropic, official</small></td><td>Scans a project and recommends the hooks, skills, subagents and MCP servers worth adding. Read-only.</td><td class="u">ask how to set up Claude Code for a project</td></tr>
+  <tr><td class="n">claude-mem<small>thedotmack</small></td><td>Memory across sessions: records what Claude did and feeds the useful parts back in next time. Uses extra tokens.</td><td class="u">runs in the background every session</td></tr>
+  <tr><td class="n">usage-limit-reducer<small>Dubibubii</small></td><td>Reads your local usage logs, shows where tokens go, and gives the two to four fixes that matter for you.</td><td class="u">hit your limit or ask how to save tokens</td></tr>
+</table>
+
+<h2>Design</h2>
+<table>
+  <tr><td class="n">apple-design<small>dickwu</small></td><td>Design reviewer grounded in 123 pages of Apple's Human Interface Guidelines. Audits apps and screenshots for layout, accessibility and dark mode.</td><td class="u">ask "review my design" or share a screenshot</td></tr>
+  <tr><td class="n">Liquid Glass (SwiftUI)<small>haider-nawaz</small></td><td>Apple's real Liquid Glass APIs for iPhone, iPad and Mac apps in SwiftUI. For native apps, not websites.</td><td class="u">build or migrate an Apple app to iOS 26+</td></tr>
+  <tr><td class="n">frontend-design<small>Anthropic</small></td><td>Pushes UI away from templated defaults towards a clear visual direction, with deliberate type and colour choices.</td><td class="u">build a new page or component</td></tr>
+  <tr><td class="n">ui-ux-pro-max<small>nextlevelbuilder</small></td><td>A large library of styles, palettes, font pairings and chart types across React, Next.js, Vue, SwiftUI and Flutter.</td><td class="u">design or polish a site, dashboard or app</td></tr>
+</table>
+
+<h2>Writing and research</h2>
+<table>
+  <tr><td class="n">Humanizer<small>blader</small></td><td>Edits AI-sounding text so it reads like a person wrote it, without changing the meaning.</td><td class="u">ask to make text sound less like AI</td></tr>
+  <tr><td class="n">humanize<small>diaiq</small></td><td>A second rewriter aimed at passing AI detectors such as GPTZero and Turnitin.</td><td class="u">ask to get text past AI detectors</td></tr>
+  <tr><td class="n">Academic Research Skills<small>Imbad0202</small></td><td>Full research-to-paper pipeline: literature reviews, citation checks, simulated peer review, revisions and abstracts.</td><td class="u">write, review or revise an academic paper</td></tr>
+  <tr><td class="n">Agent Reach<small>Panniantong</small></td><td>Lets Claude read what normal web fetching can't: YouTube subtitles, Reddit, GitHub issues, Bilibili and more. Read-only.</td><td class="u">paste a link Claude can't open on its own</td></tr>
+</table>
+
+<h2>Skill management</h2>
+<table>
+  <tr><td class="n">find-skills<small>vercel-labs</small></td><td>Searches for existing skills that fit a task, compares them and installs the ones you approve.</td><td class="u">ask "is there a skill for…"</td></tr>
+  <tr><td class="n">task-observer<small>rebelytics</small></td><td>Watches your corrections and repeated work, then proposes small skill improvements. Nothing changes until you approve.</td><td class="u">needs a line in CLAUDE.md to switch on</td></tr>
+</table>
+
+<div class="note"><b>Before installing anything:</b> skills run with full access to your computer. Scan each one first with NVIDIA's SkillSpector: <code>skillspector scan &lt;GitHub link&gt; --no-llm</code>. A high score means "read the flagged lines", not "malware". Install from the original GitHub repo, never from a copied folder, and never share your own <code>.claude</code> folder.</div>
+
+<footer><span>web-liquid-glass: github.com/NotYousha/claude-skills</span><span>Restart Claude Code after installing</span></footer>
+</body>
+</html>
